@@ -26,6 +26,12 @@ QPushButton:pressed {
     background-color: #333333;
 }
 
+QPushButton:disabled {
+    background-color: #1A1A1A;
+    color: #555555;
+    border: 1px solid #2A2A2A;
+}
+
 QLabel#titleLabel {
     font-size: 20px;
     font-weight: 600;
@@ -41,8 +47,8 @@ QListWidget {
     background-color: #161616;
     border-right: 1px solid #2A2A2A;
     padding: 10px;
+    font-size: 14px;
 }
-
 QListWidget::item {
     padding: 8px;
     border-radius: 6px;
@@ -50,5 +56,6 @@ QListWidget::item {
 
 QListWidget::item:selected {
     background-color: #2A2A2A;
+    color: #FFFFFF;
 }
 """
