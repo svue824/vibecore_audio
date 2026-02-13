@@ -41,6 +41,12 @@ class MainWindow(QMainWindow):
         # ===== Left Sidebar =====
         self.track_list = QListWidget()
         self.track_list.setFixedWidth(220)
+
+        # ----- NEW: Enable drag-and-drop reordering -----
+        self.track_list.setDragDropMode(QListWidget.InternalMove)
+        self.track_list.setDefaultDropAction(Qt.MoveAction)
+        self.track_list.model().rowsMoved.connect(self.handle_reorder_tracks)
+
         self.track_list.itemSelectionChanged.connect(self.on_track_selected)
         main_layout.addWidget(self.track_list)
 
@@ -79,6 +85,20 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.sub_label)
         right_layout.addWidget(self.add_button)
         right_layout.addWidget(self.delete_button)
+
+    from PySide6.QtCore import Slot
+
+    @Slot()
+    def handle_reorder_tracks(self):
+        """Sync project tracks with the current sidebar order."""
+        new_order = []
+        for i in range(self.track_list.count()):
+            item_text = self.track_list.item(i).text()
+            track_name = item_text.split(" (")[0]
+            track = next((t for t in self.project.get_tracks() if t.name == track_name), None)
+            if track:
+                new_order.append(track)
+        self.project._tracks = new_order
 
     # ----- Handlers -----
     def handle_add_track(self):
