@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QInputDialog,
 )
 from PySide6.QtCore import Qt
 
@@ -18,7 +19,7 @@ from audio_editor.domain.project import Project
 from audio_editor.use_cases.add_track_to_project import AddTrackToProject
 from audio_editor.use_cases.delete_track_from_project import DeleteTrackFromProject
 from audio_editor.ui.styles import DARK_STYLE
-
+from audio_editor.use_cases.rename_track import RenameTrack
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -70,6 +71,10 @@ class MainWindow(QMainWindow):
         self.delete_button.setEnabled(False)
         self.delete_button.setObjectName("deleteButton")
 
+        self.rename_button = QPushButton("Rename Track")
+        self.rename_button.clicked.connect(self.handle_rename_track)
+        right_layout.addWidget(self.rename_button)
+
         right_layout.addWidget(self.title_label)
         right_layout.addWidget(self.sub_label)
         right_layout.addWidget(self.add_button)
@@ -114,6 +119,35 @@ class MainWindow(QMainWindow):
         # Remove from sidebar
         self.track_list.takeItem(selected_row)
         self.sub_label.setText(f"{self.project.track_count()} track(s) in project")
+
+    def handle_rename_track(self):
+        selected_row = self.track_list.currentRow()
+        if selected_row == -1:
+            return
+
+        item_text = self.track_list.item(selected_row).text()
+        track_name = item_text.split(" (")[0]
+        track_to_rename = next((t for t in self.project.get_tracks() if t.name == track_name), None)
+
+        if not track_to_rename:
+            QMessageBox.warning(self, "Error", "Track not found in project.")
+            return
+
+        # Ask user for new name
+        new_name, ok = QInputDialog.getText(self, "Rename Track", "Enter new track name:", text=track_to_rename.name)
+        if not ok or not new_name.strip():
+            return
+
+        try:
+            rename_use_case = RenameTrack(self.project)
+            rename_use_case.execute(track_to_rename, new_name)
+        except ValueError as e:
+            QMessageBox.warning(self, "Error", str(e))
+            return
+
+        # Update sidebar
+        self.track_list.item(selected_row).setText(f"{track_to_rename.name} ({len(track_to_rename.data)} samples)")
+
 
 
 def main():
