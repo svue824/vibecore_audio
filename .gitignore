@@ -17,3 +17,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Packaging artifacts
+*.egg-info/
+dist/
+build/
+
+# Pytest cache
