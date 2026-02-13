@@ -36,4 +36,19 @@ QLabel#subLabel {
     font-size: 13px;
     color: #888888;
 }
+
+QListWidget {
+    background-color: #161616;
+    border-right: 1px solid #2A2A2A;
+    padding: 10px;
+}
+
+QListWidget::item {
+    padding: 8px;
+    border-radius: 6px;
+}
+
+QListWidget::item:selected {
+    background-color: #2A2A2A;
+}
 """
