@@ -103,6 +103,11 @@ class MainWindow(QMainWindow):
         self.record_button.clicked.connect(self.handle_record_toggle)
         right_layout.addWidget(self.record_button)
 
+        self.play_button = QPushButton("Play Project")
+        self.play_button.clicked.connect(self.handle_play_project)
+        right_layout.addWidget(self.play_button)
+
+
     from PySide6.QtCore import Slot
 
     @Slot()
@@ -200,7 +205,15 @@ class MainWindow(QMainWindow):
         if not track:
             return
         self.audio_engine.play(np.array(track.data, dtype="float32"), track.sample_rate)
+    
+    def handle_play_project(self):
+        if not self.project.get_tracks():
+            QMessageBox.information(self, "Info", "No tracks to play.")
+            return
 
+        from audio_editor.use_cases.play_project import PlayProject
+        play_use_case = PlayProject(self.audio_engine)
+        play_use_case.execute(self.project.get_tracks())
 
     def handle_stop(self):
         self.audio_engine.stop()
