@@ -150,6 +150,17 @@ QListWidget::item:selected {
     color: #FFFFFF;
 }
 
+QWidget#trackRow {
+    background-color: #111111;
+    border: 1px solid transparent;
+    border-radius: 8px;
+}
+
+QWidget#trackRow[selected="true"] {
+    background-color: #25303A;
+    border: 1px solid #3B566A;
+}
+
 QListWidget#waveformList {
     background-color: #111111;
     border: none;
@@ -163,5 +174,16 @@ QListWidget#waveformList::item {
 
 QListWidget#waveformList::item:selected {
     background-color: #1E2A31;
+}
+
+QWidget#waveformRow {
+    background-color: #111111;
+    border: 1px solid transparent;
+    border-radius: 8px;
+}
+
+QWidget#waveformRow[selected="true"] {
+    background-color: #1E2A31;
+    border: 1px solid #3B566A;
 }
 """

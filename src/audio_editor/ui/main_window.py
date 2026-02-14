@@ -369,6 +369,7 @@ class MainWindow(QMainWindow):
     # When adding a track, create a container widget
     def add_track_ui_item(self, track):
         container = QWidget()
+        container.setObjectName("trackRow")
         container.setMinimumHeight(self.track_row_height)
         layout = QHBoxLayout()
         layout.setContentsMargins(4, 4, 4, 4)
@@ -403,6 +404,7 @@ class MainWindow(QMainWindow):
         self.empty_state_widget.setVisible(False)
         self.waveforms_list.setVisible(True)
         row = QWidget()
+        row.setObjectName("waveformRow")
         row_layout = QVBoxLayout()
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(0)
@@ -443,6 +445,7 @@ class MainWindow(QMainWindow):
         for track in self.project.get_tracks():
             self.add_waveform_ui_item(track)
         self.update_empty_state_visibility()
+        self._update_right_row_selection_visual()
 
     def build_empty_state_widget(self) -> QWidget:
         empty_state_widget = QWidget()
@@ -493,6 +496,7 @@ class MainWindow(QMainWindow):
         if selected_row >= 0:
             self.track_list.setCurrentRow(selected_row)
         self.delete_button.setEnabled(self.track_list.currentRow() != -1)
+        self._update_left_row_selection_visual()
 
     def clear_all_playheads(self):
         for waveform in self.track_waveform_widgets.values():
@@ -587,6 +591,30 @@ class MainWindow(QMainWindow):
         self.waveforms_list.blockSignals(True)
         self.waveforms_list.setCurrentRow(selected)
         self.waveforms_list.blockSignals(False)
+        self._update_left_row_selection_visual()
+        self._update_right_row_selection_visual()
+
+    def _set_selected_property(self, widget: QWidget, is_selected: bool):
+        widget.setProperty("selected", is_selected)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
+
+    def _update_left_row_selection_visual(self):
+        selected_row = self.track_list.currentRow()
+        for i in range(self.track_list.count()):
+            item = self.track_list.item(i)
+            row_widget = self.track_list.itemWidget(item)
+            if row_widget is not None:
+                self._set_selected_property(row_widget, i == selected_row)
+
+    def _update_right_row_selection_visual(self):
+        selected_row = self.waveforms_list.currentRow()
+        for i in range(self.waveforms_list.count()):
+            item = self.waveforms_list.item(i)
+            row_widget = self.waveforms_list.itemWidget(item)
+            if row_widget is not None:
+                self._set_selected_property(row_widget, i == selected_row)
 
     def on_tool_changed(self, tool_name: str):
         self.current_edit_tool = tool_name
