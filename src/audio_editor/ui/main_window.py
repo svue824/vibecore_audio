@@ -60,6 +60,10 @@ class MainWindow(QMainWindow):
         self.track_selection_ranges: dict[int, tuple[float, float]] = {}
         self.clipboard_audio = np.array([], dtype=np.float32)
         self.clipboard_sample_rate = 44100
+        self.undo_stack: list[dict] = []
+        self.redo_stack: list[dict] = []
+        self.max_history = 100
+        self._restoring_history = False
 
         self.setWindowTitle("VibeCore Audio")
         self.setMinimumSize(800, 500)
@@ -114,6 +118,16 @@ class MainWindow(QMainWindow):
         self.cut_button.clicked.connect(self.handle_cut_selection)
         self.cut_button.setEnabled(False)
         action_bar_layout.addWidget(self.cut_button)
+
+        self.undo_button = QPushButton("Undo")
+        self.undo_button.clicked.connect(self.handle_undo)
+        self.undo_button.setEnabled(False)
+        action_bar_layout.addWidget(self.undo_button)
+
+        self.redo_button = QPushButton("Redo")
+        self.redo_button.clicked.connect(self.handle_redo)
+        self.redo_button.setEnabled(False)
+        action_bar_layout.addWidget(self.redo_button)
 
         self.copy_button = QPushButton("Copy")
         self.copy_button.clicked.connect(self.handle_copy_selection)
@@ -208,10 +222,17 @@ class MainWindow(QMainWindow):
         self.copy_selection_shortcut.activated.connect(self.handle_copy_selection)
         self.paste_selection_shortcut = QShortcut(QKeySequence("Ctrl+V"), self)
         self.paste_selection_shortcut.activated.connect(self.handle_paste_selection)
+        self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.undo_shortcut.activated.connect(self.handle_undo)
+        self.redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self.redo_shortcut.activated.connect(self.handle_redo)
+        self.redo_shortcut_alt = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        self.redo_shortcut_alt.activated.connect(self.handle_redo)
 
     @Slot()
     def handle_reorder_tracks(self):
         """Sync project tracks with the current sidebar order."""
+        self.push_undo_state()
         new_order = []
         for i in range(self.track_list.count()):
             item = self.track_list.item(i)
@@ -234,6 +255,7 @@ class MainWindow(QMainWindow):
 
     # ----- Handlers -----
     def handle_add_track(self):
+        self.push_undo_state()
         track_number = self.project.track_count() + 1
         new_track = AudioTrack(
             name=f"Track {track_number}",
@@ -538,6 +560,7 @@ class MainWindow(QMainWindow):
         if moved_segment.size == 0:
             return
 
+        self.push_undo_state()
         target_data_before = self._track_data_array(target_track)
         target_drop_index = int(np.clip(drop_position, 0.0, 1.0) * target_data_before.size)
 
@@ -615,6 +638,102 @@ class MainWindow(QMainWindow):
         self.cut_button.setEnabled(can_cut)
         self.copy_button.setEnabled(has_selection)
         self.paste_button.setEnabled(self.clipboard_audio.size > 0)
+        self.undo_button.setEnabled(len(self.undo_stack) > 0)
+        self.redo_button.setEnabled(len(self.redo_stack) > 0)
+
+    def capture_editor_state(self) -> dict:
+        selected_row = self.track_list.currentRow()
+        tracks_state = []
+        track_index_by_id: dict[int, int] = {}
+        tracks = self.project.get_tracks()
+        for idx, track in enumerate(tracks):
+            track_index_by_id[id(track)] = idx
+            tracks_state.append(
+                {
+                    "name": track.name,
+                    "sample_rate": track.sample_rate,
+                    "data": self._track_data_array(track).copy(),
+                    "file_path": track.file_path,
+                    "volume": track.volume,
+                    "muted": track.muted,
+                    "sample_boundaries": list(track.sample_boundaries),
+                }
+            )
+
+        selections_by_index: dict[int, tuple[float, float]] = {}
+        for track_id, selection in self.track_selection_ranges.items():
+            idx = track_index_by_id.get(track_id)
+            if idx is not None:
+                selections_by_index[idx] = selection
+
+        return {
+            "tracks": tracks_state,
+            "selected_row": selected_row,
+            "selections_by_index": selections_by_index,
+        }
+
+    def restore_editor_state(self, state: dict) -> None:
+        self._restoring_history = True
+        try:
+            restored_tracks: list[AudioTrack] = []
+            for item in state.get("tracks", []):
+                track = AudioTrack(
+                    name=item["name"],
+                    sample_rate=item["sample_rate"],
+                    data=np.asarray(item["data"], dtype=np.float32),
+                    file_path=item.get("file_path"),
+                    volume=item.get("volume", 1.0),
+                    muted=item.get("muted", False),
+                )
+                track.sample_boundaries = list(item.get("sample_boundaries", []))
+                track._normalize_boundaries()
+                restored_tracks.append(track)
+
+            self.project._tracks = restored_tracks
+            self.track_selection_ranges.clear()
+            for idx, selection in state.get("selections_by_index", {}).items():
+                if 0 <= idx < len(restored_tracks):
+                    self.track_selection_ranges[id(restored_tracks[idx])] = tuple(selection)
+
+            self.stop_transport()
+            selected_row = state.get("selected_row", -1)
+            selected_track_id = None
+            if isinstance(selected_row, int) and 0 <= selected_row < len(restored_tracks):
+                selected_track_id = id(restored_tracks[selected_row])
+
+            self.refresh_track_list(selected_track_id=selected_track_id)
+            self.refresh_waveform_panel()
+            self.sub_label.setText(f"{self.project.track_count()} track(s) in project")
+            self.update_cut_controls()
+        finally:
+            self._restoring_history = False
+
+    def push_undo_state(self):
+        if self._restoring_history:
+            return
+        self.undo_stack.append(self.capture_editor_state())
+        if len(self.undo_stack) > self.max_history:
+            self.undo_stack.pop(0)
+        self.redo_stack.clear()
+        self.update_cut_controls()
+
+    def handle_undo(self):
+        if not self.undo_stack:
+            return
+        current_state = self.capture_editor_state()
+        state = self.undo_stack.pop()
+        self.redo_stack.append(current_state)
+        self.restore_editor_state(state)
+        self.update_cut_controls()
+
+    def handle_redo(self):
+        if not self.redo_stack:
+            return
+        current_state = self.capture_editor_state()
+        state = self.redo_stack.pop()
+        self.undo_stack.append(current_state)
+        self.restore_editor_state(state)
+        self.update_cut_controls()
 
     def _selection_for_copy(self) -> tuple[AudioTrack, int, int] | None:
         selected_track = self.get_selected_track()
@@ -678,6 +797,7 @@ class MainWindow(QMainWindow):
             base_index = target_data.size
 
         insert_index = target_track.nearest_boundary(base_index)
+        self.push_undo_state()
         if not target_track.insert_data(insert_index, self.clipboard_audio, as_new_segment=True):
             return
 
@@ -706,6 +826,7 @@ class MainWindow(QMainWindow):
         if not self.track_selection_ranges:
             return
 
+        self.push_undo_state()
         changed = False
         for track in self.project.get_tracks():
             selection = self.track_selection_ranges.get(id(track))
@@ -735,6 +856,7 @@ class MainWindow(QMainWindow):
 
     def split_sample_at(self, track: AudioTrack, position: float):
         split_index = self._sample_index_from_normalized(track, position)
+        self.push_undo_state()
         if track.split_sample_at(split_index):
             self.sync_waveform_for_track(track)
             self.sub_label.setText(f"Split sample marker added in {track.name}")
@@ -752,6 +874,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Split Tool", "Click inside the waveform to split.")
             return
 
+        self.push_undo_state()
         first_part = data[:split_index].copy()
         second_part = data[split_index:].copy()
         track.set_data(first_part, reset_boundaries=True)
@@ -783,6 +906,7 @@ class MainWindow(QMainWindow):
         clip_start = track.previous_boundary_before(cut_index)
         if cut_index <= clip_start:
             return
+        self.push_undo_state()
         track.cut_range(clip_start, cut_index)
         self.track_selection_ranges.pop(id(track), None)
         self.stop_transport()
@@ -797,6 +921,7 @@ class MainWindow(QMainWindow):
         if cut_index >= data.size:
             return
         cut_end = track.next_boundary_after(cut_index)
+        self.push_undo_state()
         track.cut_range(cut_index, cut_end)
         self.track_selection_ranges.pop(id(track), None)
         self.stop_transport()
@@ -827,6 +952,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "Track not found in project.")
             return
 
+        self.push_undo_state()
         # Use DeleteTrackFromProject use case
         delete_use_case = DeleteTrackFromProject(self.project)
         delete_use_case.execute(track_to_delete)
@@ -870,6 +996,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            self.push_undo_state()
             rename_use_case = RenameTrack(self.project)
             rename_use_case.execute(track_to_rename, new_name)
         except ValueError as e:
@@ -966,6 +1093,7 @@ class MainWindow(QMainWindow):
                 record_sample_rate=track.sample_rate,
             )
         else:
+            self.push_undo_state()
             stop_use_case = StopRecording(self.audio_engine)
             stop_use_case.execute(track)
             self.record_button.setText("Record")
