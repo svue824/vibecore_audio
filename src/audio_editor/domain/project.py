@@ -11,6 +11,9 @@ class Project:
     def add_track(self, track: AudioTrack) -> None:
         self._tracks.append(track)
 
+    def remove_track(self, track: AudioTrack) -> None:
+        self._tracks.remove(track)
+
     def get_tracks(self) -> List[AudioTrack]:
         return list(self._tracks)
 

@@ -10,4 +10,4 @@ class DeleteTrackFromProject:
     def execute(self, track: AudioTrack):
         if track not in self.project.get_tracks():
             raise ValueError(f"Track {track.name} not found in project.")
-        self.project.get_tracks().remove(track)
+        self.project.remove_track(track)
