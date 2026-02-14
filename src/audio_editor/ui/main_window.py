@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QSlider,
     QCheckBox,
-    QScrollArea,
     QComboBox,
     QToolButton,
     QMenu,
@@ -54,7 +53,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.audio_engine = AudioEngine()
         self.track_waveform_widgets: dict[int, WaveformWidget] = {}
-        self.track_waveform_labels: dict[int, QLabel] = {}
         self.transport_timer = QTimer(self)
         self.transport_timer.setInterval(33)
         self.transport_timer.timeout.connect(self.update_transport_visuals)
@@ -70,6 +68,11 @@ class MainWindow(QMainWindow):
         self.clipboard_audio = np.array([], dtype=np.float32)
         self.clipboard_sample_rate = 44100
         self.project_file_path: str | None = None
+        self.track_row_height = 112
+        self.waveform_height = 112
+        self.row_spacing = 10
+        self.left_row_pitch = self.track_row_height + self.row_spacing
+        self._syncing_scroll = False
         self.undo_stack: list[dict] = []
         self.redo_stack: list[dict] = []
         self.max_history = 100
@@ -251,7 +254,8 @@ class MainWindow(QMainWindow):
         # ===== Left Sidebar =====
         self.track_list = QListWidget()
         self.track_list.setFixedWidth(220)
-        self.track_list.setSpacing(4)
+        self.track_list.setSpacing(0)
+        self.track_list.setUniformItemSizes(True)
 
         # ----- NEW: Enable drag-and-drop reordering -----
         self.track_list.setDragDropMode(QListWidget.InternalMove)
@@ -269,17 +273,16 @@ class MainWindow(QMainWindow):
         right_container.setLayout(right_layout)
         main_layout.addWidget(right_container)
 
-        self.waveforms_scroll = QScrollArea()
-        self.waveforms_scroll.setWidgetResizable(True)
-        self.waveforms_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.empty_state_widget = self.build_empty_state_widget()
+        right_layout.addWidget(self.empty_state_widget)
 
-        self.waveforms_container = QWidget()
-        self.waveforms_layout = QVBoxLayout()
-        self.waveforms_layout.setSpacing(10)
-        self.waveforms_container.setLayout(self.waveforms_layout)
-
-        self.waveforms_scroll.setWidget(self.waveforms_container)
-        right_layout.addWidget(self.waveforms_scroll)
+        self.waveforms_list = QListWidget()
+        self.waveforms_list.setObjectName("waveformList")
+        self.waveforms_list.setSpacing(0)
+        self.waveforms_list.setUniformItemSizes(True)
+        self.waveforms_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.waveforms_list.setSelectionMode(QListWidget.SingleSelection)
+        right_layout.addWidget(self.waveforms_list)
         # Internal status text target used across handlers; kept hidden from panel UI.
         self.sub_label = QLabel("")
         self.sub_label.setObjectName("subLabel")
@@ -300,7 +303,23 @@ class MainWindow(QMainWindow):
         self.redo_shortcut.activated.connect(self.handle_redo)
         self.redo_shortcut_alt = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
         self.redo_shortcut_alt.activated.connect(self.handle_redo)
+        self.track_list.verticalScrollBar().valueChanged.connect(self.sync_right_scroll_to_left)
+        self.waveforms_list.verticalScrollBar().valueChanged.connect(self.sync_left_scroll_to_right)
         self.refresh_waveform_panel()
+
+    def sync_right_scroll_to_left(self, value: int):
+        if self._syncing_scroll:
+            return
+        self._syncing_scroll = True
+        self.waveforms_list.verticalScrollBar().setValue(value)
+        self._syncing_scroll = False
+
+    def sync_left_scroll_to_right(self, value: int):
+        if self._syncing_scroll:
+            return
+        self._syncing_scroll = True
+        self.track_list.verticalScrollBar().setValue(value)
+        self._syncing_scroll = False
 
     @Slot()
     def handle_reorder_tracks(self):
@@ -350,6 +369,7 @@ class MainWindow(QMainWindow):
     # When adding a track, create a container widget
     def add_track_ui_item(self, track):
         container = QWidget()
+        container.setMinimumHeight(self.track_row_height)
         layout = QHBoxLayout()
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
@@ -377,22 +397,18 @@ class MainWindow(QMainWindow):
         item = QListWidgetItem()
         self.track_list.addItem(item)
         self.track_list.setItemWidget(item, container)
-        row_height = max(container.sizeHint().height() + 10, 42)
-        item.setSizeHint(QSize(0, row_height))
+        item.setSizeHint(QSize(0, self.left_row_pitch))
 
     def add_waveform_ui_item(self, track: AudioTrack):
-        self.remove_empty_state_widget()
+        self.empty_state_widget.setVisible(False)
+        self.waveforms_list.setVisible(True)
         row = QWidget()
         row_layout = QVBoxLayout()
         row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(4)
-
-        label = QLabel(track.name)
-        label.setObjectName("subLabel")
-        row_layout.addWidget(label)
+        row_layout.setSpacing(0)
 
         waveform = WaveformWidget()
-        waveform.setFixedHeight(90)
+        waveform.setFixedHeight(self.waveform_height)
         waveform.set_track_key(self._track_key(track))
         self._apply_track_visual_state(track, waveform)
         waveform.positionClicked.connect(lambda pos, t=track: self.on_waveform_clicked(t, pos))
@@ -413,40 +429,25 @@ class MainWindow(QMainWindow):
         row_layout.addWidget(waveform)
 
         row.setLayout(row_layout)
-        self.waveforms_layout.addWidget(row)
+        row.setMinimumHeight(self.track_row_height)
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(0, self.left_row_pitch))
+        self.waveforms_list.addItem(item)
+        self.waveforms_list.setItemWidget(item, row)
         self.track_waveform_widgets[id(track)] = waveform
-        self.track_waveform_labels[id(track)] = label
-
-    def remove_empty_state_widget(self):
-        for i in range(self.waveforms_layout.count()):
-            item = self.waveforms_layout.itemAt(i)
-            widget = item.widget()
-            if widget is not None and widget.objectName() == "emptyStateWidget":
-                self.waveforms_layout.takeAt(i)
-                widget.deleteLater()
-                break
+        self.update_empty_state_visibility()
 
     def refresh_waveform_panel(self):
-        while self.waveforms_layout.count():
-            item = self.waveforms_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
+        self.waveforms_list.clear()
         self.track_waveform_widgets.clear()
-        self.track_waveform_labels.clear()
-
-        tracks = self.project.get_tracks()
-        if not tracks:
-            self.waveforms_layout.addWidget(self.build_empty_state_widget())
-        else:
-            for track in tracks:
-                self.add_waveform_ui_item(track)
+        for track in self.project.get_tracks():
+            self.add_waveform_ui_item(track)
         self.update_empty_state_visibility()
 
     def build_empty_state_widget(self) -> QWidget:
         empty_state_widget = QWidget()
         empty_state_widget.setObjectName("emptyStateWidget")
+        empty_state_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         empty_state_layout = QVBoxLayout()
         empty_state_layout.setContentsMargins(0, 36, 0, 36)
         empty_state_layout.setSpacing(8)
@@ -467,10 +468,8 @@ class MainWindow(QMainWindow):
 
     def update_empty_state_visibility(self):
         has_tracks = self.project.track_count() > 0
-        if has_tracks:
-            self.waveforms_layout.setAlignment(Qt.AlignTop)
-        else:
-            self.waveforms_layout.setAlignment(Qt.AlignCenter)
+        self.empty_state_widget.setVisible(not has_tracks)
+        self.waveforms_list.setVisible(has_tracks)
 
     def sync_waveform_for_track(self, track: AudioTrack):
         waveform = self.track_waveform_widgets.get(id(track))
@@ -481,9 +480,6 @@ class MainWindow(QMainWindow):
                 waveform.set_selection_range(selected_range[0], selected_range[1])
             else:
                 waveform.clear_selection()
-        label = self.track_waveform_labels.get(id(track))
-        if label:
-            label.setText(track.name)
 
     def refresh_track_list(self, selected_track_id: int | None = None):
         self.track_list.blockSignals(True)
@@ -588,6 +584,9 @@ class MainWindow(QMainWindow):
     def on_track_selected(self):
         selected = self.track_list.currentRow()
         self.delete_button.setEnabled(selected != -1)
+        self.waveforms_list.blockSignals(True)
+        self.waveforms_list.setCurrentRow(selected)
+        self.waveforms_list.blockSignals(False)
 
     def on_tool_changed(self, tool_name: str):
         self.current_edit_tool = tool_name

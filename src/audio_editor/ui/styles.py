@@ -137,16 +137,31 @@ QLabel#subLabel {
 QListWidget {
     background-color: #161616;
     border-right: 1px solid #2A2A2A;
-    padding: 10px;
+    padding: 0px;
     font-size: 14px;
 }
 QListWidget::item {
-    padding: 8px;
+    padding: 0px;
     border-radius: 6px;
 }
 
 QListWidget::item:selected {
     background-color: #2A2A2A;
     color: #FFFFFF;
+}
+
+QListWidget#waveformList {
+    background-color: #111111;
+    border: none;
+    padding: 0px;
+}
+
+QListWidget#waveformList::item {
+    padding: 0px;
+    border-radius: 6px;
+}
+
+QListWidget#waveformList::item:selected {
+    background-color: #1E2A31;
 }
 """
