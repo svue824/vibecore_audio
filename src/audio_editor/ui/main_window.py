@@ -20,6 +20,9 @@ from audio_editor.use_cases.add_track_to_project import AddTrackToProject
 from audio_editor.use_cases.delete_track_from_project import DeleteTrackFromProject
 from audio_editor.ui.styles import DARK_STYLE
 from audio_editor.use_cases.rename_track import RenameTrack
+from audio_editor.services.audio_engine import AudioEngine
+import numpy as np
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -79,12 +82,27 @@ class MainWindow(QMainWindow):
 
         self.rename_button = QPushButton("Rename Track")
         self.rename_button.clicked.connect(self.handle_rename_track)
-        right_layout.addWidget(self.rename_button)
 
+        self.audio_engine = AudioEngine()
+
+        self.play_button = QPushButton("Play")
+        self.play_button.clicked.connect(self.handle_play)
+
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.clicked.connect(self.handle_stop)
+
+        self.record_button = QPushButton("Record (5s)")
+        self.record_button.clicked.connect(self.handle_record)
+        
+        right_layout.addWidget(self.rename_button)
         right_layout.addWidget(self.title_label)
         right_layout.addWidget(self.sub_label)
         right_layout.addWidget(self.add_button)
         right_layout.addWidget(self.delete_button)
+
+        right_layout.addWidget(self.play_button)
+        right_layout.addWidget(self.stop_button)
+        right_layout.addWidget(self.record_button)
 
     from PySide6.QtCore import Slot
 
@@ -167,6 +185,44 @@ class MainWindow(QMainWindow):
 
         # Update sidebar
         self.track_list.item(selected_row).setText(f"{track_to_rename.name} ({len(track_to_rename.data)} samples)")
+    
+    def get_selected_track(self):
+        selected_row = self.track_list.currentRow()
+        if selected_row == -1:
+            return None
+
+        item_text = self.track_list.item(selected_row).text()
+        track_name = item_text.split(" (")[0]
+        return next((t for t in self.project.get_tracks() if t.name == track_name), None)
+
+
+    def handle_play(self):
+        track = self.get_selected_track()
+        if not track:
+            return
+        self.audio_engine.play(np.array(track.data, dtype="float32"), track.sample_rate)
+
+
+    def handle_stop(self):
+        self.audio_engine.stop()
+
+
+    def handle_record(self):
+        track = self.get_selected_track()
+        if not track:
+            return
+
+        duration = 5  # seconds (MVP)
+        recording = self.audio_engine.record(duration, track.sample_rate)
+
+        track.data = recording.tolist()
+
+        # Update UI sample count
+        selected_row = self.track_list.currentRow()
+        self.track_list.item(selected_row).setText(
+            f"{track.name} ({len(track.data)} samples)"
+        )
+
 
 
 
