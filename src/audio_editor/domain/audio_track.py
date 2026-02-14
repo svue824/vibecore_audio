@@ -13,6 +13,9 @@ class AudioTrack:
     sample_rate: int
     data: np.ndarray
     file_path: Path | None = None
+    volume: float = 1.0  # 100% by default
+    muted: bool = False
+
 
     @property
     def duration_seconds(self) -> float:

@@ -75,9 +75,10 @@ class AudioEngine:
 
         # Sum tracks
         for t in tracks:
-            if len(t.data) == 0:
+            if len(t.data) == 0 or t.muted:
                 continue
             track_data = np.array(t.data, dtype=np.float32)
+            track_data *= t.volume  # Apply volume
             # Pad if shorter
             if len(track_data) < max_length:
                 track_data = np.pad(track_data, (0, max_length - len(track_data)))
