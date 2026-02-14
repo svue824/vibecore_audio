@@ -26,6 +26,7 @@ from audio_editor.services.audio_engine import AudioEngine
 from audio_editor.use_cases.start_recording import StartRecording
 from audio_editor.use_cases.stop_recording import StopRecording
 import numpy as np
+from audio_editor.ui.waveform_widget import WaveformWidget
 
 
 class MainWindow(QMainWindow):
@@ -77,6 +78,9 @@ class MainWindow(QMainWindow):
         self.sub_label.setObjectName("subLabel")
         self.sub_label.setAlignment(Qt.AlignCenter)
         right_layout.addWidget(self.sub_label)
+
+        self.waveform_widget = WaveformWidget()
+        right_layout.addWidget(self.waveform_widget)
 
         # Buttons
         self.add_button = QPushButton("Add Track")
@@ -187,6 +191,8 @@ class MainWindow(QMainWindow):
     def on_track_selected(self):
         selected = self.track_list.currentRow()
         self.delete_button.setEnabled(selected != -1)
+        track = self.get_selected_track()
+        self.waveform_widget.set_audio_data(track.data if track else None)
 
     def handle_delete_track(self):
         selected_row = self.track_list.currentRow()
@@ -326,6 +332,7 @@ class MainWindow(QMainWindow):
             stop_use_case = StopRecording(self.audio_engine)
             stop_use_case.execute(track)
             self.record_button.setText("Record")
+            self.waveform_widget.set_audio_data(track.data)
 
             # Update the track name label (not needed for sample count since we use widgets now)
     
