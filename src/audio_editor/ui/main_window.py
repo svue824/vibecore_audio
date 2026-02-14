@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox,
 )
 from PySide6.QtCore import Qt, Slot, QSize, QTimer
+from PySide6.QtGui import QShortcut, QKeySequence
 
 from audio_editor.domain.audio_track import AudioTrack
 from audio_editor.domain.project import Project
@@ -107,6 +108,11 @@ class MainWindow(QMainWindow):
         self.record_button.clicked.connect(self.handle_record_toggle)
         action_bar_layout.addWidget(self.record_button)
 
+        self.cut_button = QPushButton("Cut")
+        self.cut_button.clicked.connect(self.handle_cut_selection)
+        self.cut_button.setEnabled(False)
+        action_bar_layout.addWidget(self.cut_button)
+
         self.play_project_button = QPushButton("Play Project")
         self.play_project_button.clicked.connect(self.handle_play_project)
         action_bar_layout.addWidget(self.play_project_button)
@@ -181,6 +187,11 @@ class MainWindow(QMainWindow):
 
         self.waveforms_scroll.setWidget(self.waveforms_container)
         right_layout.addWidget(self.waveforms_scroll)
+
+        self.delete_selection_shortcut = QShortcut(QKeySequence(Qt.Key_Delete), self)
+        self.delete_selection_shortcut.activated.connect(self.handle_cut_selection)
+        self.backspace_selection_shortcut = QShortcut(QKeySequence(Qt.Key_Backspace), self)
+        self.backspace_selection_shortcut.activated.connect(self.handle_cut_selection)
 
     @Slot()
     def handle_reorder_tracks(self):
@@ -434,6 +445,7 @@ class MainWindow(QMainWindow):
                 waveform.set_interaction_mode(self._waveform_interaction_mode_for_tool())
                 if tool_name != self.TOOL_SELECT:
                     waveform.clear_selection()
+        self.update_cut_controls()
 
     def _waveform_interaction_mode_for_tool(self) -> str:
         if self.current_edit_tool == self.TOOL_SELECT:
@@ -480,6 +492,7 @@ class MainWindow(QMainWindow):
         self.sub_label.setText(
             f"Selected {int(start * 100)}% - {int(end * 100)}% on {track.name}"
         )
+        self.update_cut_controls()
 
     def on_selection_dropped(
         self,
@@ -524,6 +537,7 @@ class MainWindow(QMainWindow):
             self.track_selection_ranges.pop(id(source_track), None)
             self.stop_transport()
             self.sync_waveform_for_track(source_track)
+            self.update_cut_controls()
             self.sub_label.setText(f"Moved selection within {source_track.name}")
             return
 
@@ -535,6 +549,7 @@ class MainWindow(QMainWindow):
         self.stop_transport()
         self.sync_waveform_for_track(source_track)
         self.sync_waveform_for_track(target_track)
+        self.update_cut_controls()
         self.sub_label.setText(f"Moved selection from {source_track.name} to {target_track.name}")
 
     def on_waveform_clicked(self, track: AudioTrack, position: float):
@@ -575,7 +590,46 @@ class MainWindow(QMainWindow):
         )
         for existing_track in self.project.get_tracks():
             self.sync_waveform_for_track(existing_track)
+        self.update_cut_controls()
         self.sub_label.setText(f"Selected clip in {track.name}")
+
+    def update_cut_controls(self):
+        has_selection = bool(self.track_selection_ranges)
+        can_cut = self.current_edit_tool == self.TOOL_SELECT and has_selection
+        self.cut_button.setEnabled(can_cut)
+
+    def handle_cut_selection(self):
+        if self.current_edit_tool != self.TOOL_SELECT:
+            return
+        if not self.track_selection_ranges:
+            return
+
+        changed = False
+        for track in self.project.get_tracks():
+            selection = self.track_selection_ranges.get(id(track))
+            if not selection:
+                continue
+
+            data = self._track_data_array(track)
+            if data.size == 0:
+                continue
+
+            start = int(np.clip(min(selection[0], selection[1]), 0.0, 1.0) * data.size)
+            end = int(np.clip(max(selection[0], selection[1]), 0.0, 1.0) * data.size)
+            if end <= start:
+                continue
+
+            track.cut_range(start, end)
+            self.sync_waveform_for_track(track)
+            changed = True
+
+        if changed:
+            self.stop_transport()
+            self.track_selection_ranges.clear()
+            for track in self.project.get_tracks():
+                self.sync_waveform_for_track(track)
+            self.sub_label.setText("Selection cut")
+        self.update_cut_controls()
 
     def split_sample_at(self, track: AudioTrack, position: float):
         split_index = self._sample_index_from_normalized(track, position)
