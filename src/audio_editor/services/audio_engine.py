@@ -45,6 +45,16 @@ class AudioEngine:
         audio = np.concatenate(self._recording_buffer, axis=0)
         return audio.flatten()
 
+    def get_recording_preview(self) -> np.ndarray:
+        """Return currently buffered recording audio without stopping the stream."""
+        if not self._recording_buffer:
+            return np.array([], dtype="float32")
+        try:
+            audio = np.concatenate(list(self._recording_buffer), axis=0)
+        except ValueError:
+            return np.array([], dtype="float32")
+        return audio.flatten()
+
     def is_recording(self) -> bool:
         return self._is_recording
 

@@ -23,3 +23,16 @@ def test_normalize_to_mono_from_stereo():
     mono = WaveformWidget._normalize_to_mono(stereo)
 
     assert np.allclose(mono, np.array([0.0, 0.375], dtype=np.float32))
+
+
+def test_set_playhead_position_clamps_values():
+    widget = WaveformWidget()
+
+    widget.set_playhead_position(1.7)
+    assert widget._playhead_position == 1.0
+
+    widget.set_playhead_position(-0.2)
+    assert widget._playhead_position == 0.0
+
+    widget.set_playhead_position(None)
+    assert widget._playhead_position is None

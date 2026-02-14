@@ -12,6 +12,7 @@ class WaveformWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._audio_data = np.array([], dtype=np.float32)
+        self._playhead_position: float | None = None
         self.setMinimumHeight(160)
 
     def set_audio_data(self, data: np.ndarray | None) -> None:
@@ -20,6 +21,14 @@ class WaveformWidget(QWidget):
             self._audio_data = np.array([], dtype=np.float32)
         else:
             self._audio_data = self._normalize_to_mono(np.asarray(data, dtype=np.float32))
+        self.update()
+
+    def set_playhead_position(self, position: float | None) -> None:
+        """Set playhead location as normalized [0,1], or None to hide it."""
+        if position is None:
+            self._playhead_position = None
+        else:
+            self._playhead_position = float(np.clip(position, 0.0, 1.0))
         self.update()
 
     @staticmethod
@@ -77,3 +86,10 @@ class WaveformWidget(QWidget):
         for x, value in enumerate(peaks):
             half_line = max_amplitude * float(value)
             painter.drawLine(x, int(mid_y - half_line), x, int(mid_y + half_line))
+
+        if self._playhead_position is not None:
+            playhead_x = int(self._playhead_position * (width - 1))
+            playhead_pen = QPen(QColor("#FF8C42"))
+            playhead_pen.setWidth(2)
+            painter.setPen(playhead_pen)
+            painter.drawLine(playhead_x, 0, playhead_x, height)

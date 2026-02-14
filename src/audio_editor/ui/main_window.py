@@ -1,4 +1,5 @@
 import sys
+import time
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QScrollArea,
 )
-from PySide6.QtCore import Qt, Slot, QSize
+from PySide6.QtCore import Qt, Slot, QSize, QTimer
 
 from audio_editor.domain.audio_track import AudioTrack
 from audio_editor.domain.project import Project
@@ -36,6 +37,16 @@ class MainWindow(QMainWindow):
         self.audio_engine = AudioEngine()
         self.track_waveform_widgets: dict[int, WaveformWidget] = {}
         self.track_waveform_labels: dict[int, QLabel] = {}
+        self.transport_timer = QTimer(self)
+        self.transport_timer.setInterval(33)
+        self.transport_timer.timeout.connect(self.update_transport_visuals)
+        self.transport_mode: str | None = None
+        self.transport_start_time = 0.0
+        self.transport_duration_seconds = 0.0
+        self.transport_track_ids: set[int] = set()
+        self.transport_record_track_id: int | None = None
+        self.transport_record_sample_rate = 44100
+        self.record_visual_window_seconds = 15.0
 
         self.setWindowTitle("VibeCore Audio")
         self.setMinimumSize(800, 500)
@@ -260,6 +271,93 @@ class MainWindow(QMainWindow):
         if label:
             label.setText(track.name)
 
+    def clear_all_playheads(self):
+        for waveform in self.track_waveform_widgets.values():
+            waveform.set_playhead_position(None)
+
+    def start_transport(
+        self,
+        mode: str,
+        track_ids: set[int],
+        duration_seconds: float,
+        record_track_id: int | None = None,
+        record_sample_rate: int = 44100,
+    ):
+        self.clear_all_playheads()
+        self.transport_mode = mode
+        self.transport_track_ids = track_ids
+        self.transport_duration_seconds = duration_seconds
+        self.transport_record_track_id = record_track_id
+        self.transport_record_sample_rate = record_sample_rate
+        self.transport_start_time = time.perf_counter()
+        self.transport_timer.start()
+        self.update_transport_visuals()
+
+    def stop_transport(self):
+        self.transport_timer.stop()
+        self.transport_mode = None
+        self.transport_track_ids.clear()
+        self.transport_duration_seconds = 0.0
+        self.transport_record_track_id = None
+        self.transport_record_sample_rate = 44100
+        self.clear_all_playheads()
+
+    @Slot()
+    def update_transport_visuals(self):
+        if self.transport_mode is None:
+            return
+
+        elapsed = time.perf_counter() - self.transport_start_time
+
+        if self.transport_mode == "record":
+            if not self.audio_engine.is_recording() or self.transport_record_track_id is None:
+                self.stop_transport()
+                return
+
+            waveform = self.track_waveform_widgets.get(self.transport_record_track_id)
+            if waveform is None:
+                return
+
+            preview = self.audio_engine.get_recording_preview()
+            window_samples = max(
+                1,
+                int(self.transport_record_sample_rate * self.record_visual_window_seconds),
+            )
+            if preview.size <= window_samples:
+                padded_preview = np.pad(preview, (0, window_samples - preview.size))
+                waveform.set_audio_data(padded_preview)
+                playhead = preview.size / window_samples
+            else:
+                waveform.set_audio_data(preview[-window_samples:])
+                playhead = 1.0
+            waveform.set_playhead_position(playhead)
+            return
+
+        if self.transport_duration_seconds <= 0:
+            self.stop_transport()
+            return
+
+        progress = min(1.0, elapsed / self.transport_duration_seconds)
+
+        if self.transport_mode == "play_track":
+            for track_id in self.transport_track_ids:
+                waveform = self.track_waveform_widgets.get(track_id)
+                if waveform is not None:
+                    waveform.set_playhead_position(progress)
+        elif self.transport_mode == "play_project":
+            for track in self.project.get_tracks():
+                waveform = self.track_waveform_widgets.get(id(track))
+                if waveform is None or len(track.data) == 0:
+                    continue
+                track_duration = len(track.data) / max(track.sample_rate, 1)
+                if track_duration <= 0:
+                    waveform.set_playhead_position(0.0)
+                else:
+                    waveform.set_playhead_position(min(1.0, elapsed / track_duration))
+
+        if progress >= 1.0:
+            self.stop_transport()
+
     def on_track_selected(self):
         selected = self.track_list.currentRow()
         self.delete_button.setEnabled(selected != -1)
@@ -291,6 +389,9 @@ class MainWindow(QMainWindow):
         # Use DeleteTrackFromProject use case
         delete_use_case = DeleteTrackFromProject(self.project)
         delete_use_case.execute(track_to_delete)
+
+        if id(track_to_delete) in self.transport_track_ids or id(track_to_delete) == self.transport_record_track_id:
+            self.stop_transport()
 
         # Remove from sidebar
         self.track_list.takeItem(selected_row)
@@ -372,9 +473,12 @@ class MainWindow(QMainWindow):
         if len(track.data) == 0:
             print(f"Track {track.name} has no data")
             return
-            
+
+        self.stop_transport()
         data_to_play = np.array(track.data, dtype="float32") * track.volume
         self.audio_engine.play(data_to_play, track.sample_rate)
+        duration_seconds = len(track.data) / max(track.sample_rate, 1)
+        self.start_transport("play_track", {id(track)}, duration_seconds)
         print(f"Playing {track.name}")
 
     
@@ -383,12 +487,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Info", "No tracks to play.")
             return
 
+        self.stop_transport()
         from audio_editor.use_cases.play_project import PlayProject
         play_use_case = PlayProject(self.audio_engine)
         play_use_case.execute(self.project.get_tracks())
+        durations = [
+            len(t.data) / max(t.sample_rate, 1)
+            for t in self.project.get_tracks()
+            if len(t.data) > 0
+        ]
+        max_duration = max(durations) if durations else 0.0
+        track_ids = {id(t) for t in self.project.get_tracks()}
+        self.start_transport("play_project", track_ids, max_duration)
 
     def handle_stop(self):
         self.audio_engine.stop()
+        self.stop_transport()
 
 
     def handle_record_toggle(self):
@@ -397,14 +511,23 @@ class MainWindow(QMainWindow):
             return
 
         if not self.audio_engine.is_recording():
+            self.stop_transport()
             start_use_case = StartRecording(self.audio_engine)
             start_use_case.execute(track.sample_rate)
             self.record_button.setText("Stop Recording")
+            self.start_transport(
+                "record",
+                {id(track)},
+                0.0,
+                record_track_id=id(track),
+                record_sample_rate=track.sample_rate,
+            )
         else:
             stop_use_case = StopRecording(self.audio_engine)
             stop_use_case.execute(track)
             self.record_button.setText("Record")
             self.sync_waveform_for_track(track)
+            self.stop_transport()
 
             # Update the track name label (not needed for sample count since we use widgets now)
     
