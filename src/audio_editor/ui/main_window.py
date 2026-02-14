@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QCheckBox,
     QScrollArea,
+    QComboBox,
 )
 from PySide6.QtCore import Qt, Slot, QSize, QTimer
 
@@ -32,6 +33,11 @@ from audio_editor.ui.waveform_widget import WaveformWidget
 
 
 class MainWindow(QMainWindow):
+    TOOL_SELECT = "Select Tool"
+    TOOL_SPLIT = "Split Tool"
+    TOOL_CUT_BACKWARD = "Backward Cut Tool"
+    TOOL_CUT_FORWARD = "Forward Cut Tool"
+
     def __init__(self):
         super().__init__()
         self.audio_engine = AudioEngine()
@@ -47,6 +53,7 @@ class MainWindow(QMainWindow):
         self.transport_record_track_id: int | None = None
         self.transport_record_sample_rate = 44100
         self.record_visual_window_seconds = 15.0
+        self.current_edit_tool = self.TOOL_SELECT
 
         self.setWindowTitle("VibeCore Audio")
         self.setMinimumSize(800, 500)
@@ -100,6 +107,22 @@ class MainWindow(QMainWindow):
         self.play_project_button = QPushButton("Play Project")
         self.play_project_button.clicked.connect(self.handle_play_project)
         action_bar_layout.addWidget(self.play_project_button)
+
+        tools_label = QLabel("Tools")
+        tools_label.setObjectName("subLabel")
+        action_bar_layout.addWidget(tools_label)
+
+        self.tools_dropdown = QComboBox()
+        self.tools_dropdown.addItems(
+            [
+                self.TOOL_SELECT,
+                self.TOOL_SPLIT,
+                self.TOOL_CUT_BACKWARD,
+                self.TOOL_CUT_FORWARD,
+            ]
+        )
+        self.tools_dropdown.currentTextChanged.connect(self.on_tool_changed)
+        action_bar_layout.addWidget(self.tools_dropdown)
         action_bar_layout.addStretch(1)
 
         # ===== Main Panels (Left + Right) =====
@@ -361,6 +384,9 @@ class MainWindow(QMainWindow):
     def on_track_selected(self):
         selected = self.track_list.currentRow()
         self.delete_button.setEnabled(selected != -1)
+
+    def on_tool_changed(self, tool_name: str):
+        self.current_edit_tool = tool_name
 
     def handle_delete_track(self):
         selected_row = self.track_list.currentRow()
