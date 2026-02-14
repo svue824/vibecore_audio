@@ -264,22 +264,10 @@ class MainWindow(QMainWindow):
         # ===== Right Content Area =====
         right_container = QWidget()
         right_layout = QVBoxLayout()
-        right_layout.setAlignment(Qt.AlignTop)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(12)
         right_container.setLayout(right_layout)
         main_layout.addWidget(right_container)
-
-        # Title
-        self.title_label = QLabel("VibeCore Audio")
-        self.title_label.setObjectName("titleLabel")
-        self.title_label.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(self.title_label)
-
-        # Subtitle / Track count
-        self.sub_label = QLabel("Create and manage audio tracks")
-        self.sub_label.setObjectName("subLabel")
-        self.sub_label.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(self.sub_label)
 
         self.waveforms_scroll = QScrollArea()
         self.waveforms_scroll.setWidgetResizable(True)
@@ -287,12 +275,16 @@ class MainWindow(QMainWindow):
 
         self.waveforms_container = QWidget()
         self.waveforms_layout = QVBoxLayout()
-        self.waveforms_layout.setAlignment(Qt.AlignTop)
         self.waveforms_layout.setSpacing(10)
         self.waveforms_container.setLayout(self.waveforms_layout)
 
         self.waveforms_scroll.setWidget(self.waveforms_container)
         right_layout.addWidget(self.waveforms_scroll)
+        # Internal status text target used across handlers; kept hidden from panel UI.
+        self.sub_label = QLabel("")
+        self.sub_label.setObjectName("subLabel")
+        self.sub_label.hide()
+        self.update_empty_state_visibility()
 
         self.delete_selection_shortcut = QShortcut(QKeySequence(Qt.Key_Delete), self)
         self.delete_selection_shortcut.activated.connect(self.handle_delete_key)
@@ -308,6 +300,7 @@ class MainWindow(QMainWindow):
         self.redo_shortcut.activated.connect(self.handle_redo)
         self.redo_shortcut_alt = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
         self.redo_shortcut_alt.activated.connect(self.handle_redo)
+        self.refresh_waveform_panel()
 
     @Slot()
     def handle_reorder_tracks(self):
@@ -388,6 +381,7 @@ class MainWindow(QMainWindow):
         item.setSizeHint(QSize(0, row_height))
 
     def add_waveform_ui_item(self, track: AudioTrack):
+        self.remove_empty_state_widget()
         row = QWidget()
         row_layout = QVBoxLayout()
         row_layout.setContentsMargins(0, 0, 0, 0)
@@ -423,6 +417,15 @@ class MainWindow(QMainWindow):
         self.track_waveform_widgets[id(track)] = waveform
         self.track_waveform_labels[id(track)] = label
 
+    def remove_empty_state_widget(self):
+        for i in range(self.waveforms_layout.count()):
+            item = self.waveforms_layout.itemAt(i)
+            widget = item.widget()
+            if widget is not None and widget.objectName() == "emptyStateWidget":
+                self.waveforms_layout.takeAt(i)
+                widget.deleteLater()
+                break
+
     def refresh_waveform_panel(self):
         while self.waveforms_layout.count():
             item = self.waveforms_layout.takeAt(0)
@@ -433,8 +436,41 @@ class MainWindow(QMainWindow):
         self.track_waveform_widgets.clear()
         self.track_waveform_labels.clear()
 
-        for track in self.project.get_tracks():
-            self.add_waveform_ui_item(track)
+        tracks = self.project.get_tracks()
+        if not tracks:
+            self.waveforms_layout.addWidget(self.build_empty_state_widget())
+        else:
+            for track in tracks:
+                self.add_waveform_ui_item(track)
+        self.update_empty_state_visibility()
+
+    def build_empty_state_widget(self) -> QWidget:
+        empty_state_widget = QWidget()
+        empty_state_widget.setObjectName("emptyStateWidget")
+        empty_state_layout = QVBoxLayout()
+        empty_state_layout.setContentsMargins(0, 36, 0, 36)
+        empty_state_layout.setSpacing(8)
+        empty_state_layout.setAlignment(Qt.AlignCenter)
+
+        title_label = QLabel("VibeCore Audio")
+        title_label.setObjectName("titleLabel")
+        title_label.setAlignment(Qt.AlignCenter)
+        empty_state_layout.addWidget(title_label)
+
+        sub_label = QLabel("Create and manage audio tracks")
+        sub_label.setObjectName("subLabel")
+        sub_label.setAlignment(Qt.AlignCenter)
+        empty_state_layout.addWidget(sub_label)
+
+        empty_state_widget.setLayout(empty_state_layout)
+        return empty_state_widget
+
+    def update_empty_state_visibility(self):
+        has_tracks = self.project.track_count() > 0
+        if has_tracks:
+            self.waveforms_layout.setAlignment(Qt.AlignTop)
+        else:
+            self.waveforms_layout.setAlignment(Qt.AlignCenter)
 
     def sync_waveform_for_track(self, track: AudioTrack):
         waveform = self.track_waveform_widgets.get(id(track))
