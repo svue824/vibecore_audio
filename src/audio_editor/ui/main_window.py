@@ -11,10 +11,11 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QInputDialog,
-    QSlider, 
+    QSlider,
     QCheckBox,
+    QScrollArea,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot, QSize
 
 from audio_editor.domain.audio_track import AudioTrack
 from audio_editor.domain.project import Project
@@ -33,6 +34,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.audio_engine = AudioEngine()
+        self.track_waveform_widgets: dict[int, WaveformWidget] = {}
+        self.track_waveform_labels: dict[int, QLabel] = {}
 
         self.setWindowTitle("VibeCore Audio")
         self.setMinimumSize(800, 500)
@@ -44,12 +47,60 @@ class MainWindow(QMainWindow):
         # ===== Central Widget =====
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
+        root_layout = QVBoxLayout()
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(10)
+        central_widget.setLayout(root_layout)
+
+        # ===== Top Action Bar =====
+        action_bar_widget = QWidget()
+        action_bar_layout = QHBoxLayout()
+        action_bar_layout.setContentsMargins(0, 0, 0, 0)
+        action_bar_layout.setSpacing(8)
+        action_bar_widget.setLayout(action_bar_layout)
+        root_layout.addWidget(action_bar_widget)
+
+        self.add_button = QPushButton("Add Track")
+        self.add_button.clicked.connect(self.handle_add_track)
+        action_bar_layout.addWidget(self.add_button)
+
+        self.delete_button = QPushButton("Delete Track")
+        self.delete_button.clicked.connect(self.handle_delete_track)
+        self.delete_button.setEnabled(False)
+        self.delete_button.setObjectName("deleteButton")
+        action_bar_layout.addWidget(self.delete_button)
+
+        self.rename_button = QPushButton("Rename Track")
+        self.rename_button.clicked.connect(self.handle_rename_track)
+        action_bar_layout.addWidget(self.rename_button)
+
+        self.play_button = QPushButton("Play")
+        self.play_button.clicked.connect(self.handle_play)
+        action_bar_layout.addWidget(self.play_button)
+
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.clicked.connect(self.handle_stop)
+        action_bar_layout.addWidget(self.stop_button)
+
+        self.record_button = QPushButton("Record")
+        self.record_button.clicked.connect(self.handle_record_toggle)
+        action_bar_layout.addWidget(self.record_button)
+
+        self.play_project_button = QPushButton("Play Project")
+        self.play_project_button.clicked.connect(self.handle_play_project)
+        action_bar_layout.addWidget(self.play_project_button)
+        action_bar_layout.addStretch(1)
+
+        # ===== Main Panels (Left + Right) =====
         main_layout = QHBoxLayout()
-        central_widget.setLayout(main_layout)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(12)
+        root_layout.addLayout(main_layout)
 
         # ===== Left Sidebar =====
         self.track_list = QListWidget()
         self.track_list.setFixedWidth(220)
+        self.track_list.setSpacing(4)
 
         # ----- NEW: Enable drag-and-drop reordering -----
         self.track_list.setDragDropMode(QListWidget.InternalMove)
@@ -62,8 +113,8 @@ class MainWindow(QMainWindow):
         # ===== Right Content Area =====
         right_container = QWidget()
         right_layout = QVBoxLayout()
-        right_layout.setAlignment(Qt.AlignCenter)
-        right_layout.setSpacing(20)
+        right_layout.setAlignment(Qt.AlignTop)
+        right_layout.setSpacing(12)
         right_container.setLayout(right_layout)
         main_layout.addWidget(right_container)
 
@@ -79,42 +130,18 @@ class MainWindow(QMainWindow):
         self.sub_label.setAlignment(Qt.AlignCenter)
         right_layout.addWidget(self.sub_label)
 
-        self.waveform_widget = WaveformWidget()
-        right_layout.addWidget(self.waveform_widget)
+        self.waveforms_scroll = QScrollArea()
+        self.waveforms_scroll.setWidgetResizable(True)
+        self.waveforms_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # Buttons
-        self.add_button = QPushButton("Add Track")
-        self.add_button.clicked.connect(self.handle_add_track)
-        right_layout.addWidget(self.add_button)
+        self.waveforms_container = QWidget()
+        self.waveforms_layout = QVBoxLayout()
+        self.waveforms_layout.setAlignment(Qt.AlignTop)
+        self.waveforms_layout.setSpacing(10)
+        self.waveforms_container.setLayout(self.waveforms_layout)
 
-        self.delete_button = QPushButton("Delete Track")
-        self.delete_button.clicked.connect(self.handle_delete_track)
-        self.delete_button.setEnabled(False)
-        self.delete_button.setObjectName("deleteButton")
-        right_layout.addWidget(self.delete_button)
-
-        self.rename_button = QPushButton("Rename Track")
-        self.rename_button.clicked.connect(self.handle_rename_track)
-        right_layout.addWidget(self.rename_button)
-
-        self.play_button = QPushButton("Play")
-        self.play_button.clicked.connect(self.handle_play)
-        right_layout.addWidget(self.play_button)
-
-        self.stop_button = QPushButton("Stop")
-        self.stop_button.clicked.connect(self.handle_stop)
-        right_layout.addWidget(self.stop_button)
-
-        self.record_button = QPushButton("Record")
-        self.record_button.clicked.connect(self.handle_record_toggle)
-        right_layout.addWidget(self.record_button)
-
-        self.play_button = QPushButton("Play Project")
-        self.play_button.clicked.connect(self.handle_play_project)
-        right_layout.addWidget(self.play_button)
-
-
-    from PySide6.QtCore import Slot
+        self.waveforms_scroll.setWidget(self.waveforms_container)
+        right_layout.addWidget(self.waveforms_scroll)
 
     @Slot()
     def handle_reorder_tracks(self):
@@ -137,6 +164,7 @@ class MainWindow(QMainWindow):
             if track:
                 new_order.append(track)
         self.project._tracks = new_order
+        self.refresh_waveform_panel()
 
     # ----- Handlers -----
     def handle_add_track(self):
@@ -153,6 +181,7 @@ class MainWindow(QMainWindow):
 
         # Mute box & vol slider
         self.add_track_ui_item(new_track)
+        self.add_waveform_ui_item(new_track)
 
         # Update subtitle
         self.sub_label.setText(f"{self.project.track_count()} track(s) in project")
@@ -161,7 +190,8 @@ class MainWindow(QMainWindow):
     def add_track_ui_item(self, track):
         container = QWidget()
         layout = QHBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(8)
 
         # Track label
         label = QLabel(track.name)
@@ -186,13 +216,53 @@ class MainWindow(QMainWindow):
         item = QListWidgetItem()
         self.track_list.addItem(item)
         self.track_list.setItemWidget(item, container)
+        row_height = max(container.sizeHint().height() + 10, 42)
+        item.setSizeHint(QSize(0, row_height))
 
+    def add_waveform_ui_item(self, track: AudioTrack):
+        row = QWidget()
+        row_layout = QVBoxLayout()
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+
+        label = QLabel(track.name)
+        label.setObjectName("subLabel")
+        row_layout.addWidget(label)
+
+        waveform = WaveformWidget()
+        waveform.setFixedHeight(90)
+        waveform.set_audio_data(track.data)
+        row_layout.addWidget(waveform)
+
+        row.setLayout(row_layout)
+        self.waveforms_layout.addWidget(row)
+        self.track_waveform_widgets[id(track)] = waveform
+        self.track_waveform_labels[id(track)] = label
+
+    def refresh_waveform_panel(self):
+        while self.waveforms_layout.count():
+            item = self.waveforms_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self.track_waveform_widgets.clear()
+        self.track_waveform_labels.clear()
+
+        for track in self.project.get_tracks():
+            self.add_waveform_ui_item(track)
+
+    def sync_waveform_for_track(self, track: AudioTrack):
+        waveform = self.track_waveform_widgets.get(id(track))
+        if waveform:
+            waveform.set_audio_data(track.data)
+        label = self.track_waveform_labels.get(id(track))
+        if label:
+            label.setText(track.name)
 
     def on_track_selected(self):
         selected = self.track_list.currentRow()
         self.delete_button.setEnabled(selected != -1)
-        track = self.get_selected_track()
-        self.waveform_widget.set_audio_data(track.data if track else None)
 
     def handle_delete_track(self):
         selected_row = self.track_list.currentRow()
@@ -225,6 +295,7 @@ class MainWindow(QMainWindow):
         # Remove from sidebar
         self.track_list.takeItem(selected_row)
         self.sub_label.setText(f"{self.project.track_count()} track(s) in project")
+        self.refresh_waveform_panel()
 
     def handle_rename_track(self):
         selected_row = self.track_list.currentRow()
@@ -264,6 +335,7 @@ class MainWindow(QMainWindow):
         # Update the label in the widget
         if widget:
             label.setText(track_to_rename.name)
+        self.sync_waveform_for_track(track_to_rename)
     
     def get_selected_track(self):
         selected_row = self.track_list.currentRow()
@@ -332,7 +404,7 @@ class MainWindow(QMainWindow):
             stop_use_case = StopRecording(self.audio_engine)
             stop_use_case.execute(track)
             self.record_button.setText("Record")
-            self.waveform_widget.set_audio_data(track.data)
+            self.sync_waveform_for_track(track)
 
             # Update the track name label (not needed for sample count since we use widgets now)
     
