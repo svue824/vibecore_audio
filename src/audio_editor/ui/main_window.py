@@ -21,12 +21,15 @@ from audio_editor.use_cases.delete_track_from_project import DeleteTrackFromProj
 from audio_editor.ui.styles import DARK_STYLE
 from audio_editor.use_cases.rename_track import RenameTrack
 from audio_editor.services.audio_engine import AudioEngine
+from audio_editor.use_cases.start_recording import StartRecording
+from audio_editor.use_cases.stop_recording import StopRecording
 import numpy as np
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.audio_engine = AudioEngine()
 
         self.setWindowTitle("VibeCore Audio")
         self.setMinimumSize(800, 500)
@@ -65,43 +68,39 @@ class MainWindow(QMainWindow):
         self.title_label = QLabel("VibeCore Audio")
         self.title_label.setObjectName("titleLabel")
         self.title_label.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(self.title_label)
 
         # Subtitle / Track count
         self.sub_label = QLabel("Create and manage audio tracks")
         self.sub_label.setObjectName("subLabel")
         self.sub_label.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(self.sub_label)
 
         # Buttons
         self.add_button = QPushButton("Add Track")
         self.add_button.clicked.connect(self.handle_add_track)
+        right_layout.addWidget(self.add_button)
 
         self.delete_button = QPushButton("Delete Track")
         self.delete_button.clicked.connect(self.handle_delete_track)
         self.delete_button.setEnabled(False)
         self.delete_button.setObjectName("deleteButton")
+        right_layout.addWidget(self.delete_button)
 
         self.rename_button = QPushButton("Rename Track")
         self.rename_button.clicked.connect(self.handle_rename_track)
-
-        self.audio_engine = AudioEngine()
+        right_layout.addWidget(self.rename_button)
 
         self.play_button = QPushButton("Play")
         self.play_button.clicked.connect(self.handle_play)
+        right_layout.addWidget(self.play_button)
 
         self.stop_button = QPushButton("Stop")
         self.stop_button.clicked.connect(self.handle_stop)
-
-        self.record_button = QPushButton("Record (5s)")
-        self.record_button.clicked.connect(self.handle_record)
-        
-        right_layout.addWidget(self.rename_button)
-        right_layout.addWidget(self.title_label)
-        right_layout.addWidget(self.sub_label)
-        right_layout.addWidget(self.add_button)
-        right_layout.addWidget(self.delete_button)
-
-        right_layout.addWidget(self.play_button)
         right_layout.addWidget(self.stop_button)
+
+        self.record_button = QPushButton("Record")
+        self.record_button.clicked.connect(self.handle_record_toggle)
         right_layout.addWidget(self.record_button)
 
     from PySide6.QtCore import Slot
@@ -207,21 +206,25 @@ class MainWindow(QMainWindow):
         self.audio_engine.stop()
 
 
-    def handle_record(self):
+    def handle_record_toggle(self):
         track = self.get_selected_track()
         if not track:
             return
 
-        duration = 5  # seconds (MVP)
-        recording = self.audio_engine.record(duration, track.sample_rate)
+        if not self.audio_engine.is_recording():
+            start_use_case = StartRecording(self.audio_engine)
+            start_use_case.execute(track.sample_rate)
+            self.record_button.setText("Stop Recording")
+        else:
+            stop_use_case = StopRecording(self.audio_engine)
+            stop_use_case.execute(track)
+            self.record_button.setText("Record")
 
-        track.data = recording.tolist()
-
-        # Update UI sample count
-        selected_row = self.track_list.currentRow()
-        self.track_list.item(selected_row).setText(
-            f"{track.name} ({len(track.data)} samples)"
-        )
+            # Update UI sample count
+            selected_row = self.track_list.currentRow()
+            self.track_list.item(selected_row).setText(
+                f"{track.name} ({len(track.data)} samples)"
+            )
 
 
 
