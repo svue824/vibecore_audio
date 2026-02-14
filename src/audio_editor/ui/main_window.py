@@ -33,6 +33,7 @@ from audio_editor.ui.waveform_widget import WaveformWidget
 
 
 class MainWindow(QMainWindow):
+    TOOL_NONE = "None"
     TOOL_SELECT = "Select Tool"
     TOOL_SPLIT = "Split Tool"
     TOOL_SPLIT_SAMPLE = "Split Sample Tool"
@@ -54,7 +55,7 @@ class MainWindow(QMainWindow):
         self.transport_record_track_id: int | None = None
         self.transport_record_sample_rate = 44100
         self.record_visual_window_seconds = 15.0
-        self.current_edit_tool = self.TOOL_SELECT
+        self.current_edit_tool = self.TOOL_NONE
         self.track_selection_ranges: dict[int, tuple[float, float]] = {}
 
         self.setWindowTitle("VibeCore Audio")
@@ -110,13 +111,14 @@ class MainWindow(QMainWindow):
         self.play_project_button.clicked.connect(self.handle_play_project)
         action_bar_layout.addWidget(self.play_project_button)
 
-        tools_label = QLabel("Tools")
+        tools_label = QLabel("Tool")
         tools_label.setObjectName("subLabel")
         action_bar_layout.addWidget(tools_label)
 
         self.tools_dropdown = QComboBox()
         self.tools_dropdown.addItems(
             [
+                self.TOOL_NONE,
                 self.TOOL_SELECT,
                 self.TOOL_SPLIT,
                 self.TOOL_SPLIT_SAMPLE,
@@ -268,10 +270,16 @@ class MainWindow(QMainWindow):
 
         waveform = WaveformWidget()
         waveform.setFixedHeight(90)
+        waveform.set_track_key(self._track_key(track))
         self._apply_track_visual_state(track, waveform)
         waveform.positionClicked.connect(lambda pos, t=track: self.on_waveform_clicked(t, pos))
         waveform.selectionChanged.connect(
             lambda start, end, t=track: self.on_waveform_selection_changed(t, start, end)
+        )
+        waveform.selectionDropped.connect(
+            lambda source_key, start, end, drop_pos, t=track: self.on_selection_dropped(
+                t, source_key, start, end, drop_pos
+            )
         )
         waveform.set_interaction_mode(self._waveform_interaction_mode_for_tool())
         selected_range = self.track_selection_ranges.get(id(track))
@@ -306,7 +314,7 @@ class MainWindow(QMainWindow):
             selected_range = self.track_selection_ranges.get(id(track))
             if selected_range:
                 waveform.set_selection_range(selected_range[0], selected_range[1])
-            elif self.current_edit_tool != self.TOOL_SELECT:
+            else:
                 waveform.clear_selection()
         label = self.track_waveform_labels.get(id(track))
         if label:
@@ -430,10 +438,18 @@ class MainWindow(QMainWindow):
     def _waveform_interaction_mode_for_tool(self) -> str:
         if self.current_edit_tool == self.TOOL_SELECT:
             return "select"
+        if self.current_edit_tool == self.TOOL_NONE:
+            return "segment_drag"
         return "click"
 
     def _track_data_array(self, track: AudioTrack) -> np.ndarray:
         return np.asarray(track.data, dtype=np.float32).flatten()
+
+    def _track_key(self, track: AudioTrack) -> str:
+        return str(id(track))
+
+    def _find_track_by_key(self, track_key: str) -> AudioTrack | None:
+        return next((track for track in self.project.get_tracks() if self._track_key(track) == track_key), None)
 
     def _apply_track_visual_state(self, track: AudioTrack, waveform: WaveformWidget):
         data = self._track_data_array(track)
@@ -465,8 +481,66 @@ class MainWindow(QMainWindow):
             f"Selected {int(start * 100)}% - {int(end * 100)}% on {track.name}"
         )
 
+    def on_selection_dropped(
+        self,
+        target_track: AudioTrack,
+        source_track_key: str,
+        selection_start: float,
+        selection_end: float,
+        drop_position: float,
+    ):
+        if self.current_edit_tool not in (self.TOOL_SELECT, self.TOOL_NONE):
+            return
+
+        source_track = self._find_track_by_key(source_track_key)
+        if source_track is None:
+            return
+
+        source_data = self._track_data_array(source_track)
+        if source_data.size == 0:
+            return
+
+        src_start = int(np.clip(min(selection_start, selection_end), 0.0, 1.0) * source_data.size)
+        src_end = int(np.clip(max(selection_start, selection_end), 0.0, 1.0) * source_data.size)
+        if src_end <= src_start:
+            return
+
+        moved_segment = source_data[src_start:src_end].copy()
+        if moved_segment.size == 0:
+            return
+
+        target_data_before = self._track_data_array(target_track)
+        target_drop_index = int(np.clip(drop_position, 0.0, 1.0) * target_data_before.size)
+
+        if source_track is target_track:
+            source_track.cut_range(src_start, src_end)
+            moved_len = src_end - src_start
+            if target_drop_index > src_end:
+                target_drop_index -= moved_len
+            elif src_start < target_drop_index <= src_end:
+                target_drop_index = src_start
+            snapped_index = source_track.nearest_boundary(target_drop_index)
+            source_track.insert_data(snapped_index, moved_segment, as_new_segment=True)
+            self.track_selection_ranges.pop(id(source_track), None)
+            self.stop_transport()
+            self.sync_waveform_for_track(source_track)
+            self.sub_label.setText(f"Moved selection within {source_track.name}")
+            return
+
+        source_track.cut_range(src_start, src_end)
+        snapped_index = target_track.nearest_boundary(target_drop_index)
+        target_track.insert_data(snapped_index, moved_segment, as_new_segment=True)
+
+        self.track_selection_ranges.pop(id(source_track), None)
+        self.stop_transport()
+        self.sync_waveform_for_track(source_track)
+        self.sync_waveform_for_track(target_track)
+        self.sub_label.setText(f"Moved selection from {source_track.name} to {target_track.name}")
+
     def on_waveform_clicked(self, track: AudioTrack, position: float):
-        if self.current_edit_tool == self.TOOL_SPLIT:
+        if self.current_edit_tool == self.TOOL_NONE:
+            self.select_entire_clip_at(track, position)
+        elif self.current_edit_tool == self.TOOL_SPLIT:
             self.split_track_at(track, position)
         elif self.current_edit_tool == self.TOOL_SPLIT_SAMPLE:
             self.split_sample_at(track, position)
@@ -474,6 +548,34 @@ class MainWindow(QMainWindow):
             self.cut_track_backward(track, position)
         elif self.current_edit_tool == self.TOOL_CUT_FORWARD:
             self.cut_track_forward(track, position)
+
+    def select_entire_clip_at(self, track: AudioTrack, position: float):
+        data = self._track_data_array(track)
+        if data.size == 0:
+            return
+
+        idx = self._sample_index_from_normalized(track, position)
+        idx = int(np.clip(idx, 0, data.size - 1))
+
+        clip_start = 0
+        clip_end = data.size
+        for boundary in track.sample_boundaries:
+            if idx < boundary:
+                clip_end = boundary
+                break
+            clip_start = boundary
+
+        if clip_end <= clip_start:
+            return
+
+        self.track_selection_ranges.clear()
+        self.track_selection_ranges[id(track)] = (
+            clip_start / data.size,
+            clip_end / data.size,
+        )
+        for existing_track in self.project.get_tracks():
+            self.sync_waveform_for_track(existing_track)
+        self.sub_label.setText(f"Selected clip in {track.name}")
 
     def split_sample_at(self, track: AudioTrack, position: float):
         split_index = self._sample_index_from_normalized(track, position)

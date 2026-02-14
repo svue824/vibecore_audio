@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import numpy as np
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import Qt, Signal, QMimeData
+from PySide6.QtGui import QColor, QPainter, QPen, QDrag
 from PySide6.QtWidgets import QWidget
 
 
@@ -10,16 +11,21 @@ class WaveformWidget(QWidget):
     """Simple waveform preview widget for a mono or stereo numpy signal."""
     positionClicked = Signal(float)
     selectionChanged = Signal(float, float)
+    selectionDropped = Signal(str, float, float, float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._audio_data = np.array([], dtype=np.float32)
         self._playhead_position: float | None = None
         self._segment_markers: list[float] = []
+        self._track_key = ""
         self._interaction_mode = "click"
         self._dragging_selection = False
+        self._drag_candidate = False
+        self._drag_start_x = 0.0
         self._selection_start: float | None = None
         self._selection_end: float | None = None
+        self.setAcceptDrops(True)
         self.setMinimumHeight(160)
 
     def set_audio_data(self, data: np.ndarray | None) -> None:
@@ -50,10 +56,14 @@ class WaveformWidget(QWidget):
         self.update()
 
     def set_interaction_mode(self, mode: str) -> None:
-        """Set interaction mode: 'select' for drag selection, otherwise click."""
+        """Set interaction mode: 'select', 'segment_drag', or 'click'."""
         self._interaction_mode = mode
         if mode != "select":
             self._dragging_selection = False
+            self._drag_candidate = False
+
+    def set_track_key(self, track_key: str) -> None:
+        self._track_key = track_key
 
     def set_selection_range(self, start: float | None, end: float | None) -> None:
         if start is None or end is None:
@@ -157,14 +167,36 @@ class WaveformWidget(QWidget):
             return
         position = self._position_to_normalized(event.position().x())
         if self._interaction_mode == "select":
+            if self._selection_start is not None and self._selection_end is not None:
+                start = min(self._selection_start, self._selection_end)
+                end = max(self._selection_start, self._selection_end)
+                if start <= position <= end:
+                    self._drag_candidate = True
+                    self._drag_start_x = event.position().x()
+                    return
             self._dragging_selection = True
             self._selection_start = position
             self._selection_end = position
             self.update()
             return
+        if self._interaction_mode == "segment_drag":
+            if self._selection_start is not None and self._selection_end is not None:
+                start = min(self._selection_start, self._selection_end)
+                end = max(self._selection_start, self._selection_end)
+                if start <= position <= end:
+                    self._drag_candidate = True
+                    self._drag_start_x = event.position().x()
+                    return
+            self.positionClicked.emit(position)
+            return
         self.positionClicked.emit(position)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if self._drag_candidate and self._interaction_mode in ("select", "segment_drag"):
+            if abs(event.position().x() - self._drag_start_x) >= 6:
+                self._drag_candidate = False
+                self._start_selection_drag()
+            return
         if not self._dragging_selection or self._interaction_mode != "select":
             return
         self._selection_end = self._position_to_normalized(event.position().x())
@@ -172,6 +204,9 @@ class WaveformWidget(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt API)
         if event.button() != Qt.LeftButton:
+            return
+        if self._drag_candidate:
+            self._drag_candidate = False
             return
         if not self._dragging_selection or self._interaction_mode != "select":
             return
@@ -182,3 +217,56 @@ class WaveformWidget(QWidget):
             end = max(self._selection_start, self._selection_end)
             self.selectionChanged.emit(start, end)
         self.update()
+
+    def _start_selection_drag(self) -> None:
+        if self._selection_start is None or self._selection_end is None or not self._track_key:
+            return
+        start = min(self._selection_start, self._selection_end)
+        end = max(self._selection_start, self._selection_end)
+        if end <= start:
+            return
+
+        payload = {
+            "source_track_key": self._track_key,
+            "selection_start": start,
+            "selection_end": end,
+        }
+        mime_data = QMimeData()
+        mime_data.setData(
+            "application/x-vibecore-selection",
+            json.dumps(payload).encode("utf-8"),
+        )
+
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+        drag.exec(Qt.MoveAction)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if event.mimeData().hasFormat("application/x-vibecore-selection"):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if event.mimeData().hasFormat("application/x-vibecore-selection"):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if not event.mimeData().hasFormat("application/x-vibecore-selection"):
+            event.ignore()
+            return
+        try:
+            payload_bytes = event.mimeData().data("application/x-vibecore-selection").data()
+            payload = json.loads(payload_bytes.decode("utf-8"))
+            source_track_key = str(payload["source_track_key"])
+            selection_start = float(payload["selection_start"])
+            selection_end = float(payload["selection_end"])
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+            event.ignore()
+            return
+
+        drop_position = self._position_to_normalized(event.position().x())
+        self.selectionDropped.emit(source_track_key, selection_start, selection_end, drop_position)
+        event.acceptProposedAction()

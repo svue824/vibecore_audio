@@ -62,6 +62,11 @@ class AudioTrack:
         self._normalize_boundaries()
         return True
 
+    def nearest_boundary(self, sample_index: int) -> int:
+        idx = int(np.clip(sample_index, 0, len(self.data)))
+        candidates = [0, *self.sample_boundaries]
+        return min(candidates, key=lambda boundary: abs(boundary - idx))
+
     def next_boundary_after(self, sample_index: int) -> int:
         idx = int(np.clip(sample_index, 0, len(self.data)))
         for boundary in self.sample_boundaries:
@@ -101,6 +106,33 @@ class AudioTrack:
                 updated_boundaries.append(boundary - remove_len)
 
         self.sample_boundaries = updated_boundaries
+        self._normalize_boundaries()
+        return True
+
+    def insert_data(self, insert_index: int, data: np.ndarray, as_new_segment: bool = True) -> bool:
+        incoming = np.asarray(data, dtype=np.float32).flatten()
+        if incoming.size == 0:
+            return False
+
+        idx = int(np.clip(insert_index, 0, len(self.data)))
+        arr = np.asarray(self.data, dtype=np.float32).flatten()
+        self.data = np.concatenate([arr[:idx], incoming, arr[idx:]])
+
+        shift = incoming.size
+        shifted_boundaries: list[int] = []
+        for boundary in self.sample_boundaries:
+            if boundary >= idx:
+                shifted_boundaries.append(boundary + shift)
+            else:
+                shifted_boundaries.append(boundary)
+
+        self.sample_boundaries = shifted_boundaries
+        if as_new_segment:
+            if idx > 0 and idx not in self.sample_boundaries:
+                self.sample_boundaries.append(idx)
+            end_idx = idx + shift
+            if end_idx not in self.sample_boundaries:
+                self.sample_boundaries.append(end_idx)
         self._normalize_boundaries()
         return True
 
