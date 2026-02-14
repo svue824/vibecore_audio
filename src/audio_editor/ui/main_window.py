@@ -1,5 +1,9 @@
+import json
+import os
 import sys
 import time
+import wave
+from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -16,9 +20,14 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QScrollArea,
     QComboBox,
+    QToolButton,
+    QMenu,
+    QFileDialog,
+    QFrame,
+    QSizePolicy,
 )
 from PySide6.QtCore import Qt, Slot, QSize, QTimer
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
 from audio_editor.domain.audio_track import AudioTrack
 from audio_editor.domain.project import Project
@@ -60,13 +69,15 @@ class MainWindow(QMainWindow):
         self.track_selection_ranges: dict[int, tuple[float, float]] = {}
         self.clipboard_audio = np.array([], dtype=np.float32)
         self.clipboard_sample_rate = 44100
+        self.project_file_path: str | None = None
         self.undo_stack: list[dict] = []
         self.redo_stack: list[dict] = []
         self.max_history = 100
         self._restoring_history = False
 
         self.setWindowTitle("VibeCore Audio")
-        self.setMinimumSize(800, 500)
+        self.setMinimumSize(1120, 680)
+        self.resize(1440, 780)
         self.setStyleSheet(DARK_STYLE)
 
         # ===== Domain State =====
@@ -82,72 +93,141 @@ class MainWindow(QMainWindow):
 
         # ===== Top Action Bar =====
         action_bar_widget = QWidget()
+        action_bar_widget.setObjectName("actionBarHost")
         action_bar_layout = QHBoxLayout()
         action_bar_layout.setContentsMargins(0, 0, 0, 0)
-        action_bar_layout.setSpacing(8)
+        action_bar_layout.setSpacing(0)
         action_bar_widget.setLayout(action_bar_layout)
         root_layout.addWidget(action_bar_widget)
 
+        self.action_strip = QWidget()
+        self.action_strip.setObjectName("actionStrip")
+        self.action_strip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        action_strip_layout = QHBoxLayout()
+        action_strip_layout.setContentsMargins(12, 10, 12, 10)
+        action_strip_layout.setSpacing(6)
+        self.action_strip.setLayout(action_strip_layout)
+        action_bar_layout.addWidget(self.action_strip, 1)
+
+        def add_action_divider():
+            divider = QFrame()
+            divider.setFrameShape(QFrame.VLine)
+            divider.setFrameShadow(QFrame.Plain)
+            divider.setObjectName("actionDivider")
+            action_strip_layout.addWidget(divider)
+
+        self.file_button = QToolButton()
+        self.file_button.setObjectName("fileButton")
+        self.file_button.setText("File")
+        self.file_button.setPopupMode(QToolButton.InstantPopup)
+        self.file_button.setMinimumWidth(84)
+        self.file_menu = QMenu(self.file_button)
+        self.file_button.setMenu(self.file_menu)
+        action_strip_layout.addWidget(self.file_button)
+
+        self.file_insert_action = QAction("Insert File...", self)
+        self.file_insert_action.triggered.connect(self.handle_insert_file)
+        self.file_menu.addAction(self.file_insert_action)
+
+        self.file_open_project_action = QAction("Open Project...", self)
+        self.file_open_project_action.triggered.connect(self.handle_open_project)
+        self.file_menu.addAction(self.file_open_project_action)
+
+        self.file_save_action = QAction("Save Project", self)
+        self.file_save_action.triggered.connect(self.handle_save_project)
+        self.file_menu.addAction(self.file_save_action)
+
+        self.file_save_as_action = QAction("Save Project As...", self)
+        self.file_save_as_action.triggered.connect(self.handle_save_project_as)
+        self.file_menu.addAction(self.file_save_as_action)
+
+        self.file_menu.addSeparator()
+        self.file_export_action = QAction("Export Mix...", self)
+        self.file_export_action.triggered.connect(self.handle_export_mix)
+        self.file_menu.addAction(self.file_export_action)
+
         self.add_button = QPushButton("Add Track")
+        self.add_button.setObjectName("actionButton")
         self.add_button.clicked.connect(self.handle_add_track)
-        action_bar_layout.addWidget(self.add_button)
+        action_strip_layout.addWidget(self.add_button)
 
         self.delete_button = QPushButton("Delete Track")
+        self.delete_button.setObjectName("actionButton")
         self.delete_button.clicked.connect(self.handle_delete_track)
         self.delete_button.setEnabled(False)
         self.delete_button.setObjectName("deleteButton")
-        action_bar_layout.addWidget(self.delete_button)
+        action_strip_layout.addWidget(self.delete_button)
 
         self.rename_button = QPushButton("Rename Track")
+        self.rename_button.setObjectName("actionButton")
         self.rename_button.clicked.connect(self.handle_rename_track)
-        action_bar_layout.addWidget(self.rename_button)
+        action_strip_layout.addWidget(self.rename_button)
+        add_action_divider()
 
-        self.play_button = QPushButton("Play")
+        self.play_button = QPushButton("▶")
+        self.play_button.setObjectName("transportButton")
+        self.play_button.setToolTip("Play")
         self.play_button.clicked.connect(self.handle_play)
-        action_bar_layout.addWidget(self.play_button)
+        action_strip_layout.addWidget(self.play_button)
 
-        self.stop_button = QPushButton("Stop")
+        self.stop_button = QPushButton("■")
+        self.stop_button.setObjectName("transportButton")
+        self.stop_button.setToolTip("Stop")
         self.stop_button.clicked.connect(self.handle_stop)
-        action_bar_layout.addWidget(self.stop_button)
+        action_strip_layout.addWidget(self.stop_button)
 
-        self.record_button = QPushButton("Record")
+        self.record_button = QPushButton("●")
+        self.record_button.setObjectName("recordButton")
+        self.record_button.setToolTip("Record")
         self.record_button.clicked.connect(self.handle_record_toggle)
-        action_bar_layout.addWidget(self.record_button)
+        action_strip_layout.addWidget(self.record_button)
+        add_action_divider()
 
         self.cut_button = QPushButton("Cut")
+        self.cut_button.setObjectName("actionButton")
         self.cut_button.clicked.connect(self.handle_cut_selection)
         self.cut_button.setEnabled(False)
-        action_bar_layout.addWidget(self.cut_button)
+        action_strip_layout.addWidget(self.cut_button)
 
         self.undo_button = QPushButton("Undo")
+        self.undo_button.setObjectName("actionButton")
         self.undo_button.clicked.connect(self.handle_undo)
         self.undo_button.setEnabled(False)
-        action_bar_layout.addWidget(self.undo_button)
+        action_strip_layout.addWidget(self.undo_button)
 
         self.redo_button = QPushButton("Redo")
+        self.redo_button.setObjectName("actionButton")
         self.redo_button.clicked.connect(self.handle_redo)
         self.redo_button.setEnabled(False)
-        action_bar_layout.addWidget(self.redo_button)
+        action_strip_layout.addWidget(self.redo_button)
 
         self.copy_button = QPushButton("Copy")
+        self.copy_button.setObjectName("actionButton")
         self.copy_button.clicked.connect(self.handle_copy_selection)
         self.copy_button.setEnabled(False)
-        action_bar_layout.addWidget(self.copy_button)
+        action_strip_layout.addWidget(self.copy_button)
 
         self.paste_button = QPushButton("Paste")
+        self.paste_button.setObjectName("actionButton")
         self.paste_button.clicked.connect(self.handle_paste_selection)
         self.paste_button.setEnabled(False)
-        action_bar_layout.addWidget(self.paste_button)
+        action_strip_layout.addWidget(self.paste_button)
+        add_action_divider()
 
         self.play_project_button = QPushButton("Play Project")
+        self.play_project_button.setObjectName("actionButton")
         self.play_project_button.clicked.connect(self.handle_play_project)
-        action_bar_layout.addWidget(self.play_project_button)
+        action_strip_layout.addWidget(self.play_project_button)
+        add_action_divider()
 
         tools_label = QLabel("Tool")
-        tools_label.setObjectName("subLabel")
-        action_bar_layout.addWidget(tools_label)
+        tools_label.setObjectName("actionLabel")
+        action_strip_layout.addWidget(tools_label)
 
         self.tools_dropdown = QComboBox()
+        self.tools_dropdown.setObjectName("toolPicker")
+        self.tools_dropdown.setMinimumWidth(136)
+        self.tools_dropdown.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
         self.tools_dropdown.addItems(
             [
                 self.TOOL_NONE,
@@ -159,8 +239,8 @@ class MainWindow(QMainWindow):
             ]
         )
         self.tools_dropdown.currentTextChanged.connect(self.on_tool_changed)
-        action_bar_layout.addWidget(self.tools_dropdown)
-        action_bar_layout.addStretch(1)
+        action_strip_layout.addWidget(self.tools_dropdown)
+        action_strip_layout.addStretch(1)
 
         # ===== Main Panels (Left + Right) =====
         main_layout = QHBoxLayout()
@@ -814,6 +894,221 @@ class MainWindow(QMainWindow):
         self.sub_label.setText(f"Pasted into {target_track.name}")
         self.update_cut_controls()
 
+    def _read_wav_file(self, file_path: str) -> tuple[np.ndarray, int]:
+        with wave.open(file_path, "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            sample_rate = wav_file.getframerate()
+            frame_count = wav_file.getnframes()
+            frames = wav_file.readframes(frame_count)
+
+        if sample_width == 1:
+            data = np.frombuffer(frames, dtype=np.uint8).astype(np.float32)
+            data = (data - 128.0) / 128.0
+        elif sample_width == 2:
+            data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        elif sample_width == 3:
+            raw = np.frombuffer(frames, dtype=np.uint8).reshape(-1, 3)
+            ints = (
+                raw[:, 0].astype(np.int32)
+                | (raw[:, 1].astype(np.int32) << 8)
+                | (raw[:, 2].astype(np.int32) << 16)
+            )
+            sign_bit = 1 << 23
+            ints = (ints ^ sign_bit) - sign_bit
+            data = ints.astype(np.float32) / float(1 << 23)
+        elif sample_width == 4:
+            data = np.frombuffer(frames, dtype=np.int32).astype(np.float32) / 2147483648.0
+        else:
+            raise ValueError(f"Unsupported WAV sample width: {sample_width} bytes")
+
+        if channels > 1:
+            data = data.reshape(-1, channels).mean(axis=1)
+
+        return np.clip(data, -1.0, 1.0).astype(np.float32), sample_rate
+
+    def _write_wav_file(self, file_path: str, data: np.ndarray, sample_rate: int):
+        clipped = np.clip(np.asarray(data, dtype=np.float32), -1.0, 1.0)
+        pcm = (clipped * 32767.0).astype(np.int16)
+        with wave.open(file_path, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm.tobytes())
+
+    def _render_project_mix(self) -> tuple[np.ndarray, int] | None:
+        tracks = self.project.get_tracks()
+        if not tracks:
+            return None
+
+        non_empty = [t for t in tracks if len(t.data) > 0]
+        if not non_empty:
+            return None
+
+        sample_rate = non_empty[0].sample_rate
+        max_len = max(len(t.data) for t in non_empty)
+        mix = np.zeros(max_len, dtype=np.float32)
+
+        for track in non_empty:
+            if track.muted:
+                continue
+            track_data = np.asarray(track.data, dtype=np.float32).flatten() * float(track.volume)
+            if len(track_data) < max_len:
+                track_data = np.pad(track_data, (0, max_len - len(track_data)))
+            mix += track_data
+
+        max_abs = np.max(np.abs(mix)) if mix.size > 0 else 0.0
+        if max_abs > 1.0:
+            mix = mix / max_abs
+
+        return mix.astype(np.float32), sample_rate
+
+    def handle_insert_file(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Insert Audio File",
+            "",
+            "WAV Files (*.wav);;All Files (*.*)",
+        )
+        if not paths:
+            return
+
+        added_count = 0
+        for path in paths:
+            try:
+                audio_data, sample_rate = self._read_wav_file(path)
+            except Exception as exc:
+                QMessageBox.warning(self, "Insert File", f"Failed to load {path}:\n{exc}")
+                continue
+            if added_count == 0:
+                self.push_undo_state()
+
+            base_name = Path(path).stem or f"Track {self.project.track_count() + 1}"
+            track_name = self._generate_unique_track_name(base_name)
+            track = AudioTrack(
+                name=track_name,
+                sample_rate=sample_rate,
+                data=audio_data,
+                file_path=Path(path),
+            )
+
+            add_use_case = AddTrackToProject(self.project)
+            add_use_case.execute(track)
+            added_count += 1
+
+        if added_count == 0:
+            return
+
+        self.refresh_track_list()
+        self.refresh_waveform_panel()
+        self.sub_label.setText(f"{self.project.track_count()} track(s) in project")
+        self.update_cut_controls()
+
+    def save_project_to_path(self, file_path: str):
+        payload = {
+            "version": 1,
+            "name": self.project.name,
+            "tracks": [
+                {
+                    "name": track.name,
+                    "sample_rate": track.sample_rate,
+                    "data": self._track_data_array(track).tolist(),
+                    "file_path": str(track.file_path) if track.file_path else None,
+                    "volume": track.volume,
+                    "muted": track.muted,
+                    "sample_boundaries": list(track.sample_boundaries),
+                }
+                for track in self.project.get_tracks()
+            ],
+        }
+        with open(file_path, "w", encoding="utf-8") as out_file:
+            json.dump(payload, out_file)
+        self.project_file_path = file_path
+        self.sub_label.setText(f"Saved project: {os.path.basename(file_path)}")
+
+    def handle_save_project_as(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Project As",
+            self.project_file_path or "project.vcoreproj",
+            "VibeCore Project (*.vcoreproj);;JSON Files (*.json)",
+        )
+        if not path:
+            return
+        self.save_project_to_path(path)
+
+    def handle_save_project(self):
+        if not self.project_file_path:
+            self.handle_save_project_as()
+            return
+        self.save_project_to_path(self.project_file_path)
+
+    def load_project_from_path(self, file_path: str):
+        with open(file_path, "r", encoding="utf-8") as in_file:
+            payload = json.load(in_file)
+
+        tracks_payload = payload.get("tracks", [])
+        restored_tracks: list[AudioTrack] = []
+        for item in tracks_payload:
+            track = AudioTrack(
+                name=item["name"],
+                sample_rate=int(item["sample_rate"]),
+                data=np.asarray(item.get("data", []), dtype=np.float32),
+                file_path=Path(item["file_path"]) if item.get("file_path") else None,
+                volume=float(item.get("volume", 1.0)),
+                muted=bool(item.get("muted", False)),
+            )
+            track.sample_boundaries = list(item.get("sample_boundaries", []))
+            track._normalize_boundaries()
+            restored_tracks.append(track)
+
+        self.stop_transport()
+        self.project._tracks = restored_tracks
+        self.project.name = str(payload.get("name", "My Project"))
+        self.track_selection_ranges.clear()
+        self.project_file_path = file_path
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.refresh_track_list()
+        self.refresh_waveform_panel()
+        self.sub_label.setText(f"{self.project.track_count()} track(s) in project")
+        self.update_cut_controls()
+
+    def handle_open_project(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            "",
+            "VibeCore Project (*.vcoreproj *.json);;All Files (*.*)",
+        )
+        if not path:
+            return
+        try:
+            self.load_project_from_path(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Open Project", f"Failed to open project:\n{exc}")
+
+    def handle_export_mix(self):
+        rendered = self._render_project_mix()
+        if rendered is None:
+            QMessageBox.information(self, "Export Mix", "Nothing to export.")
+            return
+        mix_data, sample_rate = rendered
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Mix",
+            "project_mix.wav",
+            "WAV Files (*.wav)",
+        )
+        if not path:
+            return
+        try:
+            self._write_wav_file(path, mix_data, sample_rate)
+            self.sub_label.setText(f"Exported mix: {os.path.basename(path)}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Mix", f"Failed to export mix:\n{exc}")
+
     def handle_delete_key(self):
         if self.current_edit_tool in (self.TOOL_SELECT, self.TOOL_NONE) and self.track_selection_ranges:
             self.handle_cut_selection()
@@ -1084,7 +1379,8 @@ class MainWindow(QMainWindow):
             self.stop_transport()
             start_use_case = StartRecording(self.audio_engine)
             start_use_case.execute(track.sample_rate)
-            self.record_button.setText("Stop Recording")
+            self.record_button.setText("■")
+            self.record_button.setToolTip("Stop Recording")
             self.start_transport(
                 "record",
                 {id(track)},
@@ -1096,7 +1392,8 @@ class MainWindow(QMainWindow):
             self.push_undo_state()
             stop_use_case = StopRecording(self.audio_engine)
             stop_use_case.execute(track)
-            self.record_button.setText("Record")
+            self.record_button.setText("●")
+            self.record_button.setToolTip("Record")
             self.sync_waveform_for_track(track)
             self.stop_transport()
 
