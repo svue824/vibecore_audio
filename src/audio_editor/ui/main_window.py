@@ -58,6 +58,8 @@ class MainWindow(QMainWindow):
         self.record_visual_window_seconds = 15.0
         self.current_edit_tool = self.TOOL_NONE
         self.track_selection_ranges: dict[int, tuple[float, float]] = {}
+        self.clipboard_audio = np.array([], dtype=np.float32)
+        self.clipboard_sample_rate = 44100
 
         self.setWindowTitle("VibeCore Audio")
         self.setMinimumSize(800, 500)
@@ -112,6 +114,16 @@ class MainWindow(QMainWindow):
         self.cut_button.clicked.connect(self.handle_cut_selection)
         self.cut_button.setEnabled(False)
         action_bar_layout.addWidget(self.cut_button)
+
+        self.copy_button = QPushButton("Copy")
+        self.copy_button.clicked.connect(self.handle_copy_selection)
+        self.copy_button.setEnabled(False)
+        action_bar_layout.addWidget(self.copy_button)
+
+        self.paste_button = QPushButton("Paste")
+        self.paste_button.clicked.connect(self.handle_paste_selection)
+        self.paste_button.setEnabled(False)
+        action_bar_layout.addWidget(self.paste_button)
 
         self.play_project_button = QPushButton("Play Project")
         self.play_project_button.clicked.connect(self.handle_play_project)
@@ -192,6 +204,10 @@ class MainWindow(QMainWindow):
         self.delete_selection_shortcut.activated.connect(self.handle_delete_key)
         self.backspace_selection_shortcut = QShortcut(QKeySequence(Qt.Key_Backspace), self)
         self.backspace_selection_shortcut.activated.connect(self.handle_delete_key)
+        self.copy_selection_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
+        self.copy_selection_shortcut.activated.connect(self.handle_copy_selection)
+        self.paste_selection_shortcut = QShortcut(QKeySequence("Ctrl+V"), self)
+        self.paste_selection_shortcut.activated.connect(self.handle_paste_selection)
 
     @Slot()
     def handle_reorder_tracks(self):
@@ -597,6 +613,86 @@ class MainWindow(QMainWindow):
         has_selection = bool(self.track_selection_ranges)
         can_cut = self.current_edit_tool in (self.TOOL_SELECT, self.TOOL_NONE) and has_selection
         self.cut_button.setEnabled(can_cut)
+        self.copy_button.setEnabled(has_selection)
+        self.paste_button.setEnabled(self.clipboard_audio.size > 0)
+
+    def _selection_for_copy(self) -> tuple[AudioTrack, int, int] | None:
+        selected_track = self.get_selected_track()
+        if selected_track and id(selected_track) in self.track_selection_ranges:
+            selection = self.track_selection_ranges[id(selected_track)]
+            data = self._track_data_array(selected_track)
+            if data.size == 0:
+                return None
+            start = int(np.clip(min(selection[0], selection[1]), 0.0, 1.0) * data.size)
+            end = int(np.clip(max(selection[0], selection[1]), 0.0, 1.0) * data.size)
+            if end > start:
+                return selected_track, start, end
+
+        for track in self.project.get_tracks():
+            selection = self.track_selection_ranges.get(id(track))
+            if not selection:
+                continue
+            data = self._track_data_array(track)
+            if data.size == 0:
+                continue
+            start = int(np.clip(min(selection[0], selection[1]), 0.0, 1.0) * data.size)
+            end = int(np.clip(max(selection[0], selection[1]), 0.0, 1.0) * data.size)
+            if end > start:
+                return track, start, end
+        return None
+
+    def handle_copy_selection(self):
+        selected = self._selection_for_copy()
+        if selected is None:
+            return
+        track, start, end = selected
+        data = self._track_data_array(track)
+        self.clipboard_audio = data[start:end].copy()
+        self.clipboard_sample_rate = track.sample_rate
+        self.sub_label.setText(f"Copied selection from {track.name}")
+        self.update_cut_controls()
+
+    def handle_paste_selection(self):
+        if self.clipboard_audio.size == 0:
+            return
+
+        target_track = self.get_selected_track()
+        if target_track is None:
+            tracks = self.project.get_tracks()
+            target_track = tracks[0] if tracks else None
+        if target_track is None:
+            return
+        if target_track.sample_rate != self.clipboard_sample_rate:
+            QMessageBox.warning(
+                self,
+                "Paste",
+                "Clipboard sample rate does not match selected track sample rate.",
+            )
+            return
+
+        target_data = self._track_data_array(target_track)
+        selection = self.track_selection_ranges.get(id(target_track))
+        if selection:
+            base_index = int(np.clip(min(selection[0], selection[1]), 0.0, 1.0) * target_data.size)
+        else:
+            base_index = target_data.size
+
+        insert_index = target_track.nearest_boundary(base_index)
+        if not target_track.insert_data(insert_index, self.clipboard_audio, as_new_segment=True):
+            return
+
+        new_end = insert_index + self.clipboard_audio.size
+        total_len = max(1, len(target_track.data))
+        self.track_selection_ranges.clear()
+        self.track_selection_ranges[id(target_track)] = (
+            insert_index / total_len,
+            new_end / total_len,
+        )
+        self.stop_transport()
+        for track in self.project.get_tracks():
+            self.sync_waveform_for_track(track)
+        self.sub_label.setText(f"Pasted into {target_track.name}")
+        self.update_cut_controls()
 
     def handle_delete_key(self):
         if self.current_edit_tool in (self.TOOL_SELECT, self.TOOL_NONE) and self.track_selection_ranges:
@@ -677,6 +773,7 @@ class MainWindow(QMainWindow):
         self.stop_transport()
         self.refresh_track_list(selected_track_id=id(track))
         self.refresh_waveform_panel()
+        self.update_cut_controls()
 
     def cut_track_backward(self, track: AudioTrack, position: float):
         data = self._track_data_array(track)
@@ -690,6 +787,7 @@ class MainWindow(QMainWindow):
         self.track_selection_ranges.pop(id(track), None)
         self.stop_transport()
         self.sync_waveform_for_track(track)
+        self.update_cut_controls()
 
     def cut_track_forward(self, track: AudioTrack, position: float):
         data = self._track_data_array(track)
@@ -703,6 +801,7 @@ class MainWindow(QMainWindow):
         self.track_selection_ranges.pop(id(track), None)
         self.stop_transport()
         self.sync_waveform_for_track(track)
+        self.update_cut_controls()
 
     def handle_delete_track(self):
         selected_row = self.track_list.currentRow()
@@ -740,6 +839,7 @@ class MainWindow(QMainWindow):
         self.refresh_track_list()
         self.sub_label.setText(f"{self.project.track_count()} track(s) in project")
         self.refresh_waveform_panel()
+        self.update_cut_controls()
 
     def handle_rename_track(self):
         selected_row = self.track_list.currentRow()
