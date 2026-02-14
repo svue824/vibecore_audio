@@ -189,9 +189,9 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.waveforms_scroll)
 
         self.delete_selection_shortcut = QShortcut(QKeySequence(Qt.Key_Delete), self)
-        self.delete_selection_shortcut.activated.connect(self.handle_cut_selection)
+        self.delete_selection_shortcut.activated.connect(self.handle_delete_key)
         self.backspace_selection_shortcut = QShortcut(QKeySequence(Qt.Key_Backspace), self)
-        self.backspace_selection_shortcut.activated.connect(self.handle_cut_selection)
+        self.backspace_selection_shortcut.activated.connect(self.handle_delete_key)
 
     @Slot()
     def handle_reorder_tracks(self):
@@ -595,11 +595,17 @@ class MainWindow(QMainWindow):
 
     def update_cut_controls(self):
         has_selection = bool(self.track_selection_ranges)
-        can_cut = self.current_edit_tool == self.TOOL_SELECT and has_selection
+        can_cut = self.current_edit_tool in (self.TOOL_SELECT, self.TOOL_NONE) and has_selection
         self.cut_button.setEnabled(can_cut)
 
+    def handle_delete_key(self):
+        if self.current_edit_tool in (self.TOOL_SELECT, self.TOOL_NONE) and self.track_selection_ranges:
+            self.handle_cut_selection()
+            return
+        self.handle_delete_track()
+
     def handle_cut_selection(self):
-        if self.current_edit_tool != self.TOOL_SELECT:
+        if self.current_edit_tool not in (self.TOOL_SELECT, self.TOOL_NONE):
             return
         if not self.track_selection_ranges:
             return
