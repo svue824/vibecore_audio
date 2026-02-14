@@ -521,9 +521,10 @@ class MainWindow(QMainWindow):
         if data.size == 0:
             return
         cut_index = self._sample_index_from_normalized(track, position)
-        if cut_index <= 0:
+        clip_start = track.previous_boundary_before(cut_index)
+        if cut_index <= clip_start:
             return
-        track.cut_range(0, cut_index)
+        track.cut_range(clip_start, cut_index)
         self.track_selection_ranges.pop(id(track), None)
         self.stop_transport()
         self.sync_waveform_for_track(track)

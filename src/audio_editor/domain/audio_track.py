@@ -69,6 +69,15 @@ class AudioTrack:
                 return boundary
         return len(self.data)
 
+    def previous_boundary_before(self, sample_index: int) -> int:
+        idx = int(np.clip(sample_index, 0, len(self.data)))
+        prev = 0
+        for boundary in self.sample_boundaries:
+            if boundary >= idx:
+                return prev
+            prev = boundary
+        return prev
+
     def cut_range(self, start_index: int, end_index: int) -> bool:
         if len(self.data) == 0:
             return False
