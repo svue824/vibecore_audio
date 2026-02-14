@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QInputDialog,
+    QSlider, 
+    QCheckBox,
 )
 from PySide6.QtCore import Qt
 
@@ -115,8 +117,18 @@ class MainWindow(QMainWindow):
         """Sync project tracks with the current sidebar order."""
         new_order = []
         for i in range(self.track_list.count()):
-            item_text = self.track_list.item(i).text()
-            track_name = item_text.split(" (")[0]
+            item = self.track_list.item(i)
+            # Get the widget to extract track name
+            widget = self.track_list.itemWidget(item)
+            if widget:
+                # Extract track name from the label in the widget
+                label = widget.layout().itemAt(0).widget()
+                track_name = label.text()
+            else:
+                # Fallback for text items
+                item_text = item.text()
+                track_name = item_text.split(" (")[0]
+            
             track = next((t for t in self.project.get_tracks() if t.name == track_name), None)
             if track:
                 new_order.append(track)
@@ -125,16 +137,52 @@ class MainWindow(QMainWindow):
     # ----- Handlers -----
     def handle_add_track(self):
         track_number = self.project.track_count() + 1
-        new_track = AudioTrack(name=f"Track {track_number}", sample_rate=44100, data=[])
+        new_track = AudioTrack(
+            name=f"Track {track_number}",
+            sample_rate=44100,
+            data=np.zeros(44100, dtype=np.float32)  # 1 second of silence
+        )
 
         # Use AddTrackToProject use case
         add_use_case = AddTrackToProject(self.project)
         add_use_case.execute(new_track)
 
-        # Update sidebar
-        item_text = f"{new_track.name} ({len(new_track.data)} samples)"
-        QListWidgetItem(item_text, self.track_list)
+        # Mute box & vol slider
+        self.add_track_ui_item(new_track)
+
+        # Update subtitle
         self.sub_label.setText(f"{self.project.track_count()} track(s) in project")
+
+    # When adding a track, create a container widget
+    def add_track_ui_item(self, track):
+        container = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Track label
+        label = QLabel(track.name)
+        layout.addWidget(label)
+
+        # Volume slider
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(int(track.volume * 100))
+        slider.valueChanged.connect(lambda val, t=track: self.on_volume_changed(t, val))
+        layout.addWidget(slider)
+
+        # Mute checkbox
+        mute_checkbox = QCheckBox("Mute")
+        mute_checkbox.setChecked(track.muted)
+        mute_checkbox.toggled.connect(lambda checked, t=track: self.on_mute_toggled(t, checked))
+        layout.addWidget(mute_checkbox)
+
+        container.setLayout(layout)
+
+        # Insert into QListWidget
+        item = QListWidgetItem()
+        self.track_list.addItem(item)
+        self.track_list.setItemWidget(item, container)
+
 
     def on_track_selected(self):
         selected = self.track_list.currentRow()
@@ -146,8 +194,18 @@ class MainWindow(QMainWindow):
             return
 
         # Find corresponding AudioTrack object
-        item_text = self.track_list.item(selected_row).text()
-        track_name = item_text.split(" (")[0]
+        item = self.track_list.item(selected_row)
+        widget = self.track_list.itemWidget(item)
+        
+        if widget:
+            # Extract track name from the label in the widget
+            label = widget.layout().itemAt(0).widget()
+            track_name = label.text()
+        else:
+            # Fallback for text items
+            item_text = item.text()
+            track_name = item_text.split(" (")[0]
+        
         track_to_delete = next((t for t in self.project.get_tracks() if t.name == track_name), None)
 
         if not track_to_delete:
@@ -167,8 +225,18 @@ class MainWindow(QMainWindow):
         if selected_row == -1:
             return
 
-        item_text = self.track_list.item(selected_row).text()
-        track_name = item_text.split(" (")[0]
+        item = self.track_list.item(selected_row)
+        widget = self.track_list.itemWidget(item)
+        
+        if widget:
+            # Extract track name from the label in the widget
+            label = widget.layout().itemAt(0).widget()
+            track_name = label.text()
+        else:
+            # Fallback for text items
+            item_text = item.text()
+            track_name = item_text.split(" (")[0]
+        
         track_to_rename = next((t for t in self.project.get_tracks() if t.name == track_name), None)
 
         if not track_to_rename:
@@ -187,24 +255,50 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", str(e))
             return
 
-        # Update sidebar
-        self.track_list.item(selected_row).setText(f"{track_to_rename.name} ({len(track_to_rename.data)} samples)")
+        # Update the label in the widget
+        if widget:
+            label.setText(track_to_rename.name)
     
     def get_selected_track(self):
         selected_row = self.track_list.currentRow()
         if selected_row == -1:
             return None
 
-        item_text = self.track_list.item(selected_row).text()
-        track_name = item_text.split(" (")[0]
+        item = self.track_list.item(selected_row)
+        widget = self.track_list.itemWidget(item)
+        
+        if widget:
+            # Extract track name from the label in the widget
+            label = widget.layout().itemAt(0).widget()
+            track_name = label.text()
+        else:
+            # Fallback for text items
+            item_text = item.text()
+            track_name = item_text.split(" (")[0]
+        
         return next((t for t in self.project.get_tracks() if t.name == track_name), None)
 
 
     def handle_play(self):
         track = self.get_selected_track()
         if not track:
+            print("No track selected")
             return
-        self.audio_engine.play(np.array(track.data, dtype="float32"), track.sample_rate)
+        
+        print(f"Attempting to play {track.name}: muted={track.muted}, volume={track.volume}, data_len={len(track.data)}")
+        
+        if track.muted:
+            print(f"Track {track.name} is muted, skipping playback")
+            return
+            
+        if len(track.data) == 0:
+            print(f"Track {track.name} has no data")
+            return
+            
+        data_to_play = np.array(track.data, dtype="float32") * track.volume
+        self.audio_engine.play(data_to_play, track.sample_rate)
+        print(f"Playing {track.name}")
+
     
     def handle_play_project(self):
         if not self.project.get_tracks():
@@ -233,13 +327,17 @@ class MainWindow(QMainWindow):
             stop_use_case.execute(track)
             self.record_button.setText("Record")
 
-            # Update UI sample count
-            selected_row = self.track_list.currentRow()
-            self.track_list.item(selected_row).setText(
-                f"{track.name} ({len(track.data)} samples)"
-            )
-
-
+            # Update the track name label (not needed for sample count since we use widgets now)
+    
+    def on_volume_changed(self, track, value):
+        """Handle volume slider changes"""
+        track.volume = value / 100
+        print(f"{track.name} volume = {track.volume}")  # debug
+    
+    def on_mute_toggled(self, track, checked):
+        """Handle mute checkbox toggle"""
+        track.muted = checked
+        print(f"{track.name} muted = {track.muted}")  # debug
 
 
 def main():
