@@ -75,7 +75,7 @@ class AudioEngine:
             return
 
         # Find max length
-        max_length = max(len(t.data) for t in tracks if t.data)
+        max_length = max((len(t.data) for t in tracks if len(t.data) > 0), default=0)
 
         if max_length == 0:
             return

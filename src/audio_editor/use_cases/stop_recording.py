@@ -8,4 +8,4 @@ class StopRecording:
 
     def execute(self, track: AudioTrack):
         audio = self.audio_engine.stop_recording()
-        track.data = audio.tolist()
+        track.append_data(audio, as_new_segment=True)

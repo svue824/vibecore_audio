@@ -14,6 +14,10 @@ class Project:
     def remove_track(self, track: AudioTrack) -> None:
         self._tracks.remove(track)
 
+    def insert_track_after(self, existing_track: AudioTrack, new_track: AudioTrack) -> None:
+        index = self._tracks.index(existing_track)
+        self._tracks.insert(index + 1, new_track)
+
     def get_tracks(self) -> List[AudioTrack]:
         return list(self._tracks)
 
