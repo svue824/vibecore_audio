@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QSizePolicy,
 )
-from PySide6.QtCore import Qt, Slot, QSize, QTimer
+from PySide6.QtCore import Qt, Slot, QSize, QTimer, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
 from audio_editor.domain.audio_track import AudioTrack
@@ -285,6 +285,7 @@ class MainWindow(QMainWindow):
         self.track_list.model().rowsMoved.connect(self.handle_reorder_tracks)
 
         self.track_list.itemSelectionChanged.connect(self.on_track_selected)
+        self.track_list.viewport().installEventFilter(self)
         main_layout.addWidget(self.track_list)
 
         # ===== Right Content Area =====
@@ -304,6 +305,7 @@ class MainWindow(QMainWindow):
         self.waveforms_list.setUniformItemSizes(True)
         self.waveforms_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.waveforms_list.setSelectionMode(QListWidget.SingleSelection)
+        self.waveforms_list.viewport().installEventFilter(self)
         right_layout.addWidget(self.waveforms_list)
         # Internal status text target used across handlers; kept hidden from panel UI.
         self.sub_label = QLabel("")
@@ -725,6 +727,32 @@ class MainWindow(QMainWindow):
         self.waveforms_list.blockSignals(False)
         self._update_left_row_selection_visual()
         self._update_right_row_selection_visual()
+
+    def clear_track_selection(self):
+        self.track_list.blockSignals(True)
+        self.waveforms_list.blockSignals(True)
+        self.track_list.clearSelection()
+        self.waveforms_list.clearSelection()
+        self.track_list.setCurrentRow(-1)
+        self.waveforms_list.setCurrentRow(-1)
+        self.track_list.blockSignals(False)
+        self.waveforms_list.blockSignals(False)
+        self.delete_button.setEnabled(False)
+        self._update_left_row_selection_visual()
+        self._update_right_row_selection_visual()
+        self.update_cut_controls()
+
+    def eventFilter(self, watched, event):  # noqa: N802 (Qt API)
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            if watched == self.track_list.viewport():
+                index = self.track_list.indexAt(event.position().toPoint())
+                if not index.isValid():
+                    self.clear_track_selection()
+            elif watched == self.waveforms_list.viewport():
+                index = self.waveforms_list.indexAt(event.position().toPoint())
+                if not index.isValid():
+                    self.clear_track_selection()
+        return super().eventFilter(watched, event)
 
     def _set_selected_property(self, widget: QWidget, is_selected: bool):
         widget.setProperty("selected", is_selected)
