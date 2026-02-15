@@ -121,6 +121,11 @@ class WaveformWidget(QWidget):
         height = rect.height()
         mid_y = height / 2
 
+        border_pen = QPen(QColor("#2A2A2A"))
+        painter.setPen(border_pen)
+        painter.drawLine(0, 0, width - 1, 0)
+        painter.drawLine(0, height - 1, width - 1, height - 1)
+
         axis_pen = QPen(QColor("#2F2F2F"))
         painter.setPen(axis_pen)
         painter.drawLine(0, int(mid_y), width, int(mid_y))
@@ -270,3 +275,83 @@ class WaveformWidget(QWidget):
         drop_position = self._position_to_normalized(event.position().x())
         self.selectionDropped.emit(source_track_key, selection_start, selection_end, drop_position)
         event.acceptProposedAction()
+
+
+class TimelineWidget(QWidget):
+    """Project-level timeline ruler with a single playhead."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._duration_seconds = 0.0
+        self._playhead_position: float | None = None
+        self.setMinimumHeight(36)
+        self.setMaximumHeight(36)
+
+    def set_duration_seconds(self, duration_seconds: float) -> None:
+        self._duration_seconds = max(0.0, float(duration_seconds))
+        self.update()
+
+    def set_playhead_position(self, position: float | None) -> None:
+        if position is None:
+            self._playhead_position = None
+        else:
+            self._playhead_position = float(np.clip(position, 0.0, 1.0))
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        rect = self.rect()
+        painter.fillRect(rect, QColor("#111111"))
+
+        if rect.width() <= 1:
+            return
+
+        left = 0
+        right = rect.width() - 1
+        baseline_y = rect.height() - 12
+
+        axis_pen = QPen(QColor("#3A3A3A"))
+        painter.setPen(axis_pen)
+        painter.drawLine(left, baseline_y, right, baseline_y)
+
+        label_pen = QPen(QColor("#9D9D9D"))
+        painter.setPen(label_pen)
+
+        duration = max(self._duration_seconds, 0.0)
+        if duration <= 0.0:
+            painter.drawText(2, 11, "0.0s")
+        else:
+            target_ticks = 6
+            raw_step = duration / target_ticks
+            if raw_step <= 0.25:
+                step = 0.25
+            elif raw_step <= 0.5:
+                step = 0.5
+            elif raw_step <= 1.0:
+                step = 1.0
+            elif raw_step <= 2.0:
+                step = 2.0
+            elif raw_step <= 5.0:
+                step = 5.0
+            else:
+                step = 10.0
+
+            tick_time = 0.0
+            while tick_time <= duration + 1e-6:
+                ratio = tick_time / duration if duration > 0 else 0.0
+                x = int(left + ratio * (right - left))
+                painter.drawLine(x, baseline_y - 5, x, baseline_y + 2)
+                painter.drawText(x + 2, 11, f"{tick_time:.1f}s")
+                tick_time += step
+
+            if duration % step > 1e-6:
+                painter.drawLine(right, baseline_y - 5, right, baseline_y + 2)
+                painter.drawText(max(2, right - 40), 11, f"{duration:.1f}s")
+
+        if self._playhead_position is not None:
+            playhead_x = int(left + self._playhead_position * (right - left))
+            playhead_pen = QPen(QColor("#FF8C42"))
+            playhead_pen.setWidth(2)
+            painter.setPen(playhead_pen)
+            painter.drawLine(playhead_x, 0, playhead_x, rect.height())

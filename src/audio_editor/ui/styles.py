@@ -177,13 +177,33 @@ QListWidget#waveformList::item:selected {
 }
 
 QWidget#waveformRow {
-    background-color: #111111;
-    border: 1px solid transparent;
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 0, y2: 1,
+        stop: 0 #111111,
+        stop: 0.495 #111111,
+        stop: 0.5 #2F2F2F,
+        stop: 0.505 #111111,
+        stop: 1 #111111
+    );
+    border-top: 1px solid #2A2A2A;
+    border-bottom: 1px solid #2A2A2A;
+    border-left: 1px solid transparent;
+    border-right: 1px solid transparent;
     border-radius: 8px;
 }
 
 QWidget#waveformRow[selected="true"] {
-    background-color: #1E2A31;
-    border: 1px solid #3B566A;
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 0, y2: 1,
+        stop: 0 #1E2A31,
+        stop: 0.495 #1E2A31,
+        stop: 0.5 #3A5A6A,
+        stop: 0.505 #1E2A31,
+        stop: 1 #1E2A31
+    );
+    border-top: 1px solid #3B566A;
+    border-bottom: 1px solid #3B566A;
+    border-left: 1px solid #3B566A;
+    border-right: 1px solid #3B566A;
 }
 """
