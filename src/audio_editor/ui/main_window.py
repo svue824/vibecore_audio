@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QSizePolicy,
 )
-from PySide6.QtCore import Qt, Slot, QSize, QTimer, QEvent
+from PySide6.QtCore import Qt, Slot, QSize, QTimer, QEvent, QPoint
 from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
 from audio_editor.domain.audio_track import AudioTrack
@@ -79,14 +79,15 @@ class MainWindow(QMainWindow):
         self.track_row_height = 112
         self.waveform_height = 112
         self.waveform_min_width = 10
-        self.drop_snap_threshold_seconds = 0.08
+        self.drop_snap_threshold_seconds = 0.14
         self.drop_silence_threshold = 1e-3
         self.row_spacing = 10
         self.left_row_pitch = self.track_row_height + self.row_spacing
         self._syncing_scroll = False
         self.undo_stack: list[dict] = []
         self.redo_stack: list[dict] = []
-        self.max_history = 100
+        # Keep undo/redo bounded to reduce large numpy snapshot churn.
+        self.max_history = 25
         self._restoring_history = False
         self._waveform_widgets_by_track_id: dict[int, WaveformWidget] = {}
         self.global_playhead_position: float | None = None
@@ -330,6 +331,8 @@ class MainWindow(QMainWindow):
         self.waveforms_list.setUniformItemSizes(True)
         self.waveforms_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.waveforms_list.setSelectionMode(QListWidget.SingleSelection)
+        self.waveforms_list.setAcceptDrops(True)
+        self.waveforms_list.viewport().setAcceptDrops(True)
         self.waveforms_list.viewport().installEventFilter(self)
         right_layout.addWidget(self.waveforms_list)
         self.waveform_playhead_overlay = QFrame(self.waveforms_list.viewport())
@@ -481,8 +484,8 @@ class MainWindow(QMainWindow):
             lambda start, end, t=track: self.on_waveform_selection_changed(t, start, end)
         )
         waveform.selectionDropped.connect(
-            lambda source_key, start, end, drop_pos, t=track: self.on_selection_dropped(
-                t, source_key, start, end, drop_pos
+            lambda source_key, start, end, drop_pos, anchor_ratio, t=track: self.on_selection_dropped(
+                t, source_key, start, end, drop_pos, anchor_ratio
             )
         )
         waveform.set_interaction_mode(self._waveform_interaction_mode_for_tool())
@@ -822,6 +825,57 @@ class MainWindow(QMainWindow):
         self.update_cut_controls()
 
     def eventFilter(self, watched, event):  # noqa: N802 (Qt API)
+        if not hasattr(self, "waveforms_list") or not hasattr(self, "track_list"):
+            return super().eventFilter(watched, event)
+
+        if watched == self.waveforms_list.viewport():
+            if event.type() in (QEvent.DragEnter, QEvent.DragMove):
+                if event.mimeData().hasFormat("application/x-vibecore-selection"):
+                    event.acceptProposedAction()
+                    return True
+            elif event.type() == QEvent.Drop:
+                if not event.mimeData().hasFormat("application/x-vibecore-selection"):
+                    event.ignore()
+                    return True
+
+                point = event.position().toPoint()
+                # Resolve row by Y to support drops across full lane width.
+                index = self.waveforms_list.indexAt(QPoint(2, point.y()))
+                if not index.isValid():
+                    event.ignore()
+                    return True
+
+                row = index.row()
+                tracks = self.project.get_tracks()
+                if row < 0 or row >= len(tracks):
+                    event.ignore()
+                    return True
+
+                try:
+                    payload_bytes = event.mimeData().data("application/x-vibecore-selection").data()
+                    payload = json.loads(payload_bytes.decode("utf-8"))
+                    source_track_key = str(payload["source_track_key"])
+                    selection_start = float(payload["selection_start"])
+                    selection_end = float(payload["selection_end"])
+                    anchor_ratio = float(payload.get("anchor_ratio", 0.5))
+                except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                    event.ignore()
+                    return True
+
+                viewport = self.waveforms_list.viewport()
+                lane_width = max(1, min(max(1, viewport.width() - 4), max(1, self.timeline_widget.width())))
+                drop_position = float(np.clip(point.x() / lane_width, 0.0, 1.0))
+                self.on_selection_dropped(
+                    tracks[row],
+                    source_track_key,
+                    selection_start,
+                    selection_end,
+                    drop_position,
+                    anchor_ratio,
+                )
+                event.acceptProposedAction()
+                return True
+
         if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
             if watched == self.track_list.viewport():
                 index = self.track_list.indexAt(event.position().toPoint())
@@ -886,13 +940,60 @@ class MainWindow(QMainWindow):
     def _apply_track_visual_state(self, track: AudioTrack, waveform: WaveformWidget):
         data = self._track_data_array(track)
         waveform.set_audio_data(data)
-        waveform.set_segment_markers(track.sample_boundaries, len(data))
+        waveform.set_segment_markers(list(track.sample_boundaries), len(data))
 
     def _sample_index_from_normalized(self, track: AudioTrack, position: float) -> int:
         data = self._track_data_array(track)
         if data.size == 0:
             return 0
         return int(np.clip(position, 0.0, 1.0) * data.size)
+
+    def _find_audio_runs(self, track: AudioTrack, threshold: float = 1e-3) -> list[tuple[int, int]]:
+        data = self._track_data_array(track)
+        if data.size == 0:
+            return []
+        # Use a short envelope window so zero-crossings inside real audio do not
+        # break one clip into many tiny runs.
+        window = max(1, int(max(track.sample_rate, 1) * 0.02))  # 20 ms
+        abs_data = np.abs(data)
+        if window > 1:
+            kernel = np.ones(window, dtype=np.float32) / float(window)
+            envelope = np.convolve(abs_data, kernel, mode="same")
+        else:
+            envelope = abs_data
+
+        # More permissive floor for whole-clip picking in None tool mode.
+        mask = envelope > max(1e-6, threshold * 0.25)
+        if not np.any(mask):
+            return []
+
+        runs: list[tuple[int, int]] = []
+        in_run = False
+        start = 0
+        for i, is_audio in enumerate(mask):
+            if is_audio and not in_run:
+                in_run = True
+                start = i
+            elif not is_audio and in_run:
+                runs.append((start, i))
+                in_run = False
+        if in_run:
+            runs.append((start, data.size))
+
+        if not runs:
+            return []
+
+        # Merge runs separated by tiny silent holes so a single sample still
+        # selects as one full region with None tool.
+        merge_gap = max(1, int(max(track.sample_rate, 1) * 0.2))  # 200 ms
+        merged: list[tuple[int, int]] = [runs[0]]
+        for run_start, run_end in runs[1:]:
+            prev_start, prev_end = merged[-1]
+            if run_start - prev_end <= merge_gap:
+                merged[-1] = (prev_start, run_end)
+            else:
+                merged.append((run_start, run_end))
+        return merged
 
     def _timeline_sample_index_from_normalized(self, track: AudioTrack, position: float) -> int:
         visible_seconds = self._visible_timeline_duration_seconds()
@@ -901,12 +1002,191 @@ class MainWindow(QMainWindow):
         span_samples = max(data_samples, timeline_samples)
         return int(np.clip(position, 0.0, 1.0) * span_samples)
 
+    def _clip_boundaries(self, track: AudioTrack) -> list[int]:
+        boundaries: set[int] = {0}
+        runs = self._find_audio_runs(track, threshold=self.drop_silence_threshold)
+        for start, end in runs:
+            if start > 0:
+                boundaries.add(int(start))
+            boundaries.add(int(end))
+        for boundary in track.sample_boundaries:
+            boundary_int = int(max(0, boundary))
+            if boundary_int > 0:
+                boundaries.add(boundary_int)
+        return sorted(boundaries)
+
+    def _nearest_clip_boundary(self, track: AudioTrack, raw_index: int) -> int:
+        idx = int(max(0, raw_index))
+        boundaries = self._clip_boundaries(track)
+        if not boundaries:
+            return 0
+        return min(boundaries, key=lambda boundary: abs(boundary - idx))
+
     def _resolve_drop_insert_index(self, track: AudioTrack, raw_index: int) -> int:
-        nearest = track.nearest_boundary(raw_index)
+        nearest = self._nearest_clip_boundary(track, raw_index)
         threshold_samples = max(1, int(max(track.sample_rate, 1) * self.drop_snap_threshold_seconds))
         if abs(nearest - raw_index) <= threshold_samples:
             return nearest
         return int(max(0, raw_index))
+
+    def _drop_start_from_anchor(self, drop_index: int, segment_len: int, anchor_ratio: float) -> int:
+        anchor = float(np.clip(anchor_ratio, 0.0, 1.0))
+        return int(max(0, round(drop_index - anchor * segment_len)))
+
+    def _boundary_insert_index_if_close(
+        self,
+        track: AudioTrack,
+        drop_index: int,
+        desired_start: int | None = None,
+        segment_len: int = 0,
+    ) -> int | None:
+        boundaries = self._clip_boundaries(track)
+        if not boundaries:
+            return None
+        threshold_samples = max(1, int(max(track.sample_rate, 1) * self.drop_snap_threshold_seconds))
+        idx = int(max(0, drop_index))
+        best: tuple[int, int] | None = None  # (distance, boundary)
+        edge_start = int(max(0, desired_start if desired_start is not None else idx))
+        edge_end = int(max(edge_start, edge_start + max(0, segment_len)))
+        for boundary in boundaries:
+            distance = abs(idx - boundary)
+            # Also consider dragged clip edges; this makes append/insert feel natural.
+            if desired_start is not None and segment_len > 0:
+                distance = min(distance, abs(edge_start - boundary), abs(edge_end - boundary))
+            if distance <= threshold_samples and (best is None or distance < best[0]):
+                best = (distance, int(boundary))
+        return best[1] if best is not None else None
+
+    def _nearest_boundary_for_segment(
+        self,
+        track: AudioTrack,
+        desired_start: int,
+        segment_len: int,
+    ) -> int | None:
+        boundaries = self._clip_boundaries(track)
+        if not boundaries:
+            return None
+        start = int(max(0, desired_start))
+        end = int(max(start, start + max(0, segment_len)))
+        best: tuple[int, int] | None = None
+        for boundary in boundaries:
+            distance = min(abs(start - boundary), abs(end - boundary))
+            if best is None or distance < best[0]:
+                best = (distance, int(boundary))
+        return best[1] if best is not None else None
+
+    def _insert_index_for_boundary(
+        self,
+        boundary: int,
+        desired_start: int,
+        segment_len: int,
+        segment_data: np.ndarray | None = None,
+    ) -> int:
+        content_start = 0
+        content_end = int(max(0, segment_len))
+        if segment_data is not None and segment_data.size > 0:
+            nz = np.flatnonzero(np.abs(np.asarray(segment_data, dtype=np.float32)) > self.drop_silence_threshold)
+            if nz.size > 0:
+                content_start = int(nz[0])
+                content_end = int(nz[-1]) + 1
+
+        desired_content_start = desired_start + content_start
+        desired_content_end = desired_start + content_end
+        if abs(desired_content_end - boundary) < abs(desired_content_start - boundary):
+            return int(max(0, boundary - content_end))
+        return int(max(0, boundary - content_start))
+
+    def _snap_drop_start_if_close(self, track: AudioTrack, start_index: int, segment_len: int) -> int:
+        nearest = self._nearest_clip_boundary(track, start_index + (segment_len // 2))
+        threshold_samples = max(1, int(max(track.sample_rate, 1) * self.drop_snap_threshold_seconds))
+        start_dist = abs(start_index - nearest)
+        end_dist = abs((start_index + segment_len) - nearest)
+        if min(start_dist, end_dist) <= threshold_samples:
+            if start_dist <= end_dist:
+                return int(max(0, nearest))
+            return int(max(0, nearest - segment_len))
+        return int(max(0, start_index))
+
+    def _track_has_audio(self, track: AudioTrack, threshold: float | None = None) -> bool:
+        data = self._track_data_array(track)
+        if data.size == 0:
+            return False
+        threshold = self.drop_silence_threshold if threshold is None else threshold
+        return bool(np.any(np.abs(data) > threshold))
+
+    def _clip_span_at_index(self, track: AudioTrack, sample_index: int) -> tuple[int, int] | None:
+        data = self._track_data_array(track)
+        if data.size == 0:
+            return None
+
+        idx = int(np.clip(sample_index, 0, data.size - 1))
+        boundaries = self._clip_boundaries(track)
+        if len(boundaries) < 2:
+            return None
+
+        for i in range(len(boundaries) - 1):
+            start = boundaries[i]
+            end = boundaries[i + 1]
+            if start <= idx < end:
+                segment = data[start:end]
+                if segment.size == 0:
+                    return None
+                if np.any(np.abs(segment) > self.drop_silence_threshold):
+                    return int(start), int(end)
+                return None
+        return None
+
+    def _can_place_segment_in_gap(
+        self,
+        track: AudioTrack,
+        start_index: int,
+        segment_len: int,
+        threshold: float | None = None,
+    ) -> bool:
+        if segment_len <= 0:
+            return False
+        threshold = self.drop_silence_threshold if threshold is None else threshold
+        data = self._track_data_array(track)
+        start = int(max(0, start_index))
+        end = start + int(segment_len)
+        if start >= data.size:
+            return True
+        occupied = data[start:min(end, data.size)]
+        return not bool(np.any(np.abs(occupied) > threshold))
+
+    def _refresh_track_boundaries_from_audio(self, track: AudioTrack):
+        runs = self._find_audio_runs(track, threshold=self.drop_silence_threshold)
+        boundaries: set[int] = set()
+        for start, end in runs:
+            if start > 0:
+                boundaries.add(int(start))
+            boundaries.add(int(end))
+        track.sample_boundaries = sorted(boundaries)
+        track._normalize_boundaries()
+
+    def _remove_source_segment_for_move(self, track: AudioTrack, start: int, end: int) -> bool:
+        data = self._track_data_array(track)
+        if data.size == 0:
+            return False
+        start_idx = int(np.clip(start, 0, data.size))
+        end_idx = int(np.clip(end, 0, data.size))
+        if end_idx <= start_idx:
+            return False
+
+        threshold = self.drop_silence_threshold
+        touches_left = start_idx > 0 and abs(float(data[start_idx - 1])) > threshold
+        touches_right = end_idx < data.size and abs(float(data[end_idx])) > threshold
+        collapse = touches_left and touches_right
+
+        if collapse:
+            track.cut_range(start_idx, end_idx)
+            return True
+
+        cleared = data.copy()
+        cleared[start_idx:end_idx] = 0.0
+        track.set_data(cleared, reset_boundaries=False)
+        self._refresh_track_boundaries_from_audio(track)
+        return False
 
     def _generate_unique_track_name(self, base_name: str) -> str:
         existing = {t.name for t in self.project.get_tracks()}
@@ -918,6 +1198,16 @@ class MainWindow(QMainWindow):
             if candidate not in existing:
                 return candidate
             counter += 1
+
+    def _clip_run_at_index(self, track: AudioTrack, sample_index: int) -> tuple[int, int] | None:
+        data = self._track_data_array(track)
+        if data.size == 0:
+            return None
+        idx = int(np.clip(sample_index, 0, data.size - 1))
+        for start, end in self._find_audio_runs(track, threshold=self.drop_silence_threshold):
+            if start <= idx < end:
+                return start, end
+        return None
 
     def on_waveform_selection_changed(self, track: AudioTrack, start: float, end: float):
         if self.current_edit_tool != self.TOOL_SELECT:
@@ -935,6 +1225,7 @@ class MainWindow(QMainWindow):
         selection_start: float,
         selection_end: float,
         drop_position: float,
+        anchor_ratio: float = 0.5,
     ):
         if self.current_edit_tool not in (self.TOOL_SELECT, self.TOOL_NONE):
             return
@@ -956,59 +1247,187 @@ class MainWindow(QMainWindow):
         if moved_segment.size == 0:
             return
 
-        self.push_undo_state()
-        target_drop_index = self._timeline_sample_index_from_normalized(target_track, drop_position)
+        drop_index = self._timeline_sample_index_from_normalized(target_track, drop_position)
+        segment_len = moved_segment.size
+        desired_start = self._drop_start_from_anchor(drop_index, segment_len, anchor_ratio)
+        near_boundary = self._boundary_insert_index_if_close(
+            target_track,
+            drop_index,
+            desired_start=desired_start,
+            segment_len=segment_len,
+        )
 
         if source_track is target_track:
-            source_track.cut_range(src_start, src_end)
+            self.push_undo_state()
+            collapsed = self._remove_source_segment_for_move(source_track, src_start, src_end)
             moved_len = src_end - src_start
-            if target_drop_index > src_end:
-                target_drop_index -= moved_len
-            elif src_start < target_drop_index <= src_end:
-                target_drop_index = src_start
-            exact_index = int(max(0, target_drop_index))
+            if collapsed:
+                if drop_index > src_end:
+                    drop_index -= moved_len
+                elif src_start < drop_index <= src_end:
+                    drop_index = src_start + int(segment_len * float(np.clip(anchor_ratio, 0.0, 1.0)))
+
+            desired_start = self._drop_start_from_anchor(drop_index, segment_len, anchor_ratio)
+            near_boundary = self._boundary_insert_index_if_close(
+                source_track,
+                drop_index,
+                desired_start=desired_start,
+                segment_len=segment_len,
+            )
+            if near_boundary is not None:
+                insert_index = self._insert_index_for_boundary(
+                    near_boundary,
+                    desired_start,
+                    segment_len,
+                    moved_segment,
+                )
+                source_track.insert_data(
+                    insert_index,
+                    moved_segment,
+                    as_new_segment=True,
+                    allow_gaps=False,
+                )
+                self.track_selection_ranges.clear()
+                self.stop_transport()
+                self.sync_waveform_for_track(source_track)
+                self.update_cut_controls()
+                self.sub_label.setText(f"Moved selection within {source_track.name}")
+                return
+
+            if not self._can_place_segment_in_gap(source_track, desired_start, segment_len):
+                force_boundary = self._nearest_boundary_for_segment(source_track, desired_start, segment_len)
+                if force_boundary is None:
+                    # Restore original placement if no boundary is available.
+                    source_track.place_data_at(
+                        src_start,
+                        moved_segment,
+                        as_new_segment=True,
+                        overwrite_silence_only=False,
+                        silence_threshold=self.drop_silence_threshold,
+                    )
+                    self.sync_waveform_for_track(source_track)
+                    self.update_cut_controls()
+                    self.sub_label.setText("Drop blocked: overlaps existing sample")
+                    return
+                force_insert = self._insert_index_for_boundary(
+                    force_boundary,
+                    desired_start,
+                    segment_len,
+                    moved_segment,
+                )
+                source_track.insert_data(
+                    force_insert,
+                    moved_segment,
+                    as_new_segment=True,
+                    allow_gaps=False,
+                )
+                self.track_selection_ranges.clear()
+                self.stop_transport()
+                self.sync_waveform_for_track(source_track)
+                self.update_cut_controls()
+                self.sub_label.setText(f"Moved selection within {source_track.name}")
+                return
+
             placed_exact = source_track.place_data_at(
-                exact_index,
+                desired_start,
                 moved_segment,
                 as_new_segment=True,
                 overwrite_silence_only=True,
                 silence_threshold=self.drop_silence_threshold,
             )
             if not placed_exact:
-                insert_index = self._resolve_drop_insert_index(source_track, target_drop_index)
-                source_track.insert_data(
-                    insert_index,
+                source_track.place_data_at(
+                    src_start,
                     moved_segment,
                     as_new_segment=True,
-                    allow_gaps=True,
+                    overwrite_silence_only=False,
+                    silence_threshold=self.drop_silence_threshold,
                 )
-            self.track_selection_ranges.pop(id(source_track), None)
+                self.sync_waveform_for_track(source_track)
+                self.update_cut_controls()
+                self.sub_label.setText("Drop blocked: overlaps existing sample")
+                return
+            self.track_selection_ranges.clear()
             self.stop_transport()
             self.sync_waveform_for_track(source_track)
             self.update_cut_controls()
             self.sub_label.setText(f"Moved selection within {source_track.name}")
             return
 
-        source_track.cut_range(src_start, src_end)
-        exact_index = int(max(0, target_drop_index))
-        target_is_empty = len(self._track_data_array(target_track)) == 0
-        placed_exact = target_track.place_data_at(
-            exact_index,
-            moved_segment,
-            as_new_segment=True,
-            overwrite_silence_only=not target_is_empty,
-            silence_threshold=self.drop_silence_threshold,
-        )
-        if not placed_exact:
-            insert_index = self._resolve_drop_insert_index(target_track, target_drop_index)
+        if near_boundary is not None:
+            insert_index = self._insert_index_for_boundary(
+                near_boundary,
+                desired_start,
+                segment_len,
+                moved_segment,
+            )
+            self.push_undo_state()
+            self._remove_source_segment_for_move(source_track, src_start, src_end)
             target_track.insert_data(
                 insert_index,
                 moved_segment,
                 as_new_segment=True,
-                allow_gaps=True,
+                allow_gaps=False,
             )
+            self.track_selection_ranges.clear()
+            self.stop_transport()
+            self.sync_waveform_for_track(source_track)
+            self.sync_waveform_for_track(target_track)
+            self.update_cut_controls()
+            self.sub_label.setText(f"Moved selection from {source_track.name} to {target_track.name}")
+            return
 
-        self.track_selection_ranges.pop(id(source_track), None)
+        if not self._can_place_segment_in_gap(target_track, desired_start, segment_len):
+            force_boundary = self._nearest_boundary_for_segment(target_track, desired_start, segment_len)
+            if force_boundary is None:
+                self.sub_label.setText("Drop blocked: overlaps existing sample")
+                return
+            force_insert = self._insert_index_for_boundary(
+                force_boundary,
+                desired_start,
+                segment_len,
+                moved_segment,
+            )
+            self.push_undo_state()
+            self._remove_source_segment_for_move(source_track, src_start, src_end)
+            target_track.insert_data(
+                force_insert,
+                moved_segment,
+                as_new_segment=True,
+                allow_gaps=False,
+            )
+            self.track_selection_ranges.clear()
+            self.stop_transport()
+            self.sync_waveform_for_track(source_track)
+            self.sync_waveform_for_track(target_track)
+            self.update_cut_controls()
+            self.sub_label.setText(f"Moved selection from {source_track.name} to {target_track.name}")
+            return
+
+        self.push_undo_state()
+        self._remove_source_segment_for_move(source_track, src_start, src_end)
+        placed_exact = target_track.place_data_at(
+            desired_start,
+            moved_segment,
+            as_new_segment=True,
+            overwrite_silence_only=True,
+            silence_threshold=self.drop_silence_threshold,
+        )
+        if not placed_exact:
+            # Restore source when cross-track placement fails unexpectedly.
+            source_track.place_data_at(
+                src_start,
+                moved_segment,
+                as_new_segment=True,
+                overwrite_silence_only=False,
+                silence_threshold=self.drop_silence_threshold,
+            )
+            self.sync_waveform_for_track(source_track)
+            self.update_cut_controls()
+            self.sub_label.setText("Drop blocked: overlaps existing sample")
+            return
+
+        self.track_selection_ranges.clear()
         self.stop_transport()
         self.sync_waveform_for_track(source_track)
         self.sync_waveform_for_track(target_track)
@@ -1034,17 +1453,14 @@ class MainWindow(QMainWindow):
 
         idx = self._sample_index_from_normalized(track, position)
         idx = int(np.clip(idx, 0, data.size - 1))
-
-        clip_start = 0
-        clip_end = data.size
-        for boundary in track.sample_boundaries:
-            if idx < boundary:
-                clip_end = boundary
-                break
-            clip_start = boundary
-
-        if clip_end <= clip_start:
+        span = self._clip_span_at_index(track, idx)
+        if span is None:
+            self.track_selection_ranges.pop(id(track), None)
+            self.sync_waveform_for_track(track)
+            self.update_cut_controls()
+            self.sub_label.setText(f"No clip at clicked position in {track.name}")
             return
+        clip_start, clip_end = span
 
         self.track_selection_ranges.clear()
         self.track_selection_ranges[id(track)] = (
@@ -1542,11 +1958,15 @@ class MainWindow(QMainWindow):
         if data.size == 0:
             return
         cut_index = self._sample_index_from_normalized(track, position)
-        clip_start = track.previous_boundary_before(cut_index)
-        if cut_index <= clip_start:
+        run = self._clip_run_at_index(track, cut_index)
+        if run is None:
+            return
+        clip_start, clip_end = run
+        cut_end = int(np.clip(cut_index, clip_start, clip_end))
+        if cut_end <= clip_start:
             return
         self.push_undo_state()
-        track.cut_range(clip_start, cut_index)
+        track.cut_range(clip_start, cut_end)
         self.track_selection_ranges.pop(id(track), None)
         self.stop_transport()
         self.sync_waveform_for_track(track)
@@ -1557,11 +1977,15 @@ class MainWindow(QMainWindow):
         if data.size == 0:
             return
         cut_index = self._sample_index_from_normalized(track, position)
-        if cut_index >= data.size:
+        run = self._clip_run_at_index(track, cut_index)
+        if run is None:
             return
-        cut_end = track.next_boundary_after(cut_index)
+        clip_start, clip_end = run
+        cut_start = int(np.clip(cut_index, clip_start, clip_end))
+        if cut_start >= clip_end:
+            return
         self.push_undo_state()
-        track.cut_range(cut_index, cut_end)
+        track.cut_range(cut_start, clip_end)
         self.track_selection_ranges.pop(id(track), None)
         self.stop_transport()
         self.sync_waveform_for_track(track)

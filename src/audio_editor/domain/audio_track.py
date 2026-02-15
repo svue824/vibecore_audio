@@ -109,13 +109,42 @@ class AudioTrack:
         self._normalize_boundaries()
         return True
 
-    def insert_data(self, insert_index: int, data: np.ndarray, as_new_segment: bool = True) -> bool:
+    def insert_data(
+        self,
+        insert_index: int,
+        data: np.ndarray,
+        as_new_segment: bool = True,
+        allow_gaps: bool = False,
+    ) -> bool:
         incoming = np.asarray(data, dtype=np.float32).flatten()
         if incoming.size == 0:
             return False
 
-        idx = int(np.clip(insert_index, 0, len(self.data)))
         arr = np.asarray(self.data, dtype=np.float32).flatten()
+        idx = int(max(0, insert_index))
+
+        if allow_gaps and idx > len(arr):
+            gap_len = idx - len(arr)
+            gap = np.zeros(gap_len, dtype=np.float32)
+            self.data = np.concatenate([arr, gap, incoming])
+            self.sample_boundaries = list(self.sample_boundaries)
+            if as_new_segment:
+                start_idx = idx
+                end_idx = idx + incoming.size
+                has_audio_before = np.any(np.abs(arr[:start_idx]) > 1e-6)
+                if start_idx > 0 and has_audio_before and start_idx not in self.sample_boundaries:
+                    self.sample_boundaries.append(start_idx)
+                if end_idx not in self.sample_boundaries:
+                    self.sample_boundaries.append(end_idx)
+            else:
+                if self.sample_boundaries:
+                    self.sample_boundaries[-1] = len(self.data)
+                else:
+                    self.sample_boundaries = [len(self.data)]
+            self._normalize_boundaries()
+            return True
+
+        idx = int(np.clip(idx, 0, len(arr)))
         self.data = np.concatenate([arr[:idx], incoming, arr[idx:]])
 
         shift = incoming.size
@@ -128,7 +157,8 @@ class AudioTrack:
 
         self.sample_boundaries = shifted_boundaries
         if as_new_segment:
-            if idx > 0 and idx not in self.sample_boundaries:
+            has_audio_before = np.any(np.abs(arr[:idx]) > 1e-6)
+            if idx > 0 and has_audio_before and idx not in self.sample_boundaries:
                 self.sample_boundaries.append(idx)
             end_idx = idx + shift
             if end_idx not in self.sample_boundaries:
@@ -136,11 +166,50 @@ class AudioTrack:
         self._normalize_boundaries()
         return True
 
+    def place_data_at(
+        self,
+        start_index: int,
+        data: np.ndarray,
+        as_new_segment: bool = True,
+        overwrite_silence_only: bool = True,
+        silence_threshold: float = 1e-6,
+    ) -> bool:
+        incoming = np.asarray(data, dtype=np.float32).flatten()
+        if incoming.size == 0:
+            return False
+
+        start = int(max(0, start_index))
+        end = start + incoming.size
+        arr = np.asarray(self.data, dtype=np.float32).flatten().copy()
+
+        if end > len(arr):
+            arr = np.pad(arr, (0, end - len(arr)))
+
+        if overwrite_silence_only:
+            target = arr[start:end]
+            if np.any(np.abs(target) > silence_threshold):
+                return False
+
+        arr[start:end] = incoming
+        self.data = arr
+
+        if as_new_segment:
+            has_audio_before = np.any(np.abs(arr[:start]) > silence_threshold)
+            if start > 0 and has_audio_before and start not in self.sample_boundaries:
+                self.sample_boundaries.append(start)
+            if end not in self.sample_boundaries:
+                self.sample_boundaries.append(end)
+        else:
+            if self.sample_boundaries:
+                self.sample_boundaries[-1] = len(self.data)
+            else:
+                self.sample_boundaries = [len(self.data)]
+
+        self._normalize_boundaries()
+        return True
     def _normalize_boundaries(self) -> None:
         max_len = len(self.data)
         cleaned = sorted({int(b) for b in self.sample_boundaries if 0 < int(b) <= max_len})
-        if max_len > 0 and (not cleaned or cleaned[-1] != max_len):
-            cleaned.append(max_len)
         self.sample_boundaries = cleaned
 
     @property

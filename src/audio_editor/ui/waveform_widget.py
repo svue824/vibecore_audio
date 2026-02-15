@@ -11,7 +11,7 @@ class WaveformWidget(QWidget):
     """Simple waveform preview widget for a mono or stereo numpy signal."""
     positionClicked = Signal(float)
     selectionChanged = Signal(float, float)
-    selectionDropped = Signal(str, float, float, float)
+    selectionDropped = Signal(str, float, float, float, float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -25,7 +25,9 @@ class WaveformWidget(QWidget):
         self._drag_start_x = 0.0
         self._selection_start: float | None = None
         self._selection_end: float | None = None
-        self.setAcceptDrops(True)
+        # Drops are handled by the parent lane viewport to keep coordinates
+        # consistent across full track width.
+        self.setAcceptDrops(False)
         self.setMinimumHeight(160)
 
     def set_audio_data(self, data: np.ndarray | None) -> None:
@@ -51,7 +53,7 @@ class WaveformWidget(QWidget):
             self._segment_markers = [
                 float(np.clip(boundary / total_samples, 0.0, 1.0))
                 for boundary in boundaries
-                if 0 < boundary < total_samples
+                if 0 <= boundary <= total_samples
             ]
         self.update()
 
@@ -134,11 +136,26 @@ class WaveformWidget(QWidget):
             return
 
         peaks = self.build_peaks(self._audio_data, width)
+        # Draw contiguous clip-region blocks (not per-pixel stripes).
+        clip_bg_color = QColor(110, 231, 255, 24)
+        active = peaks > 1e-3
+        run_start: int | None = None
+        for x, is_active in enumerate(active):
+            if is_active and run_start is None:
+                run_start = x
+            elif not is_active and run_start is not None:
+                painter.fillRect(run_start, 1, max(1, x - run_start), max(0, height - 2), clip_bg_color)
+                run_start = None
+        if run_start is not None:
+            painter.fillRect(run_start, 1, max(1, width - run_start), max(0, height - 2), clip_bg_color)
+
         wave_pen = QPen(QColor("#6EE7FF"))
         painter.setPen(wave_pen)
 
         max_amplitude = (height / 2) - 6
         for x, value in enumerate(peaks):
+            if value <= 1e-4:
+                continue
             half_line = max_amplitude * float(value)
             painter.drawLine(x, int(mid_y - half_line), x, int(mid_y + half_line))
 
@@ -193,12 +210,17 @@ class WaveformWidget(QWidget):
                     self._drag_start_x = event.position().x()
                     return
             self.positionClicked.emit(position)
+            # Allow single gesture: click selects clip, keep dragging to move it.
+            self._drag_candidate = True
+            self._drag_start_x = event.position().x()
             return
         self.positionClicked.emit(position)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt API)
         if self._drag_candidate and self._interaction_mode in ("select", "segment_drag"):
-            if abs(event.position().x() - self._drag_start_x) >= 6:
+            if abs(event.position().x() - self._drag_start_x) >= 2:
+                # Capture anchor at actual drag-start moment to avoid perceived lag.
+                self._drag_start_x = event.position().x()
                 self._drag_candidate = False
                 self._start_selection_drag()
             return
@@ -235,6 +257,13 @@ class WaveformWidget(QWidget):
             "source_track_key": self._track_key,
             "selection_start": start,
             "selection_end": end,
+            "anchor_ratio": float(
+                np.clip(
+                    (self._position_to_normalized(self._drag_start_x) - start) / max(1e-9, end - start),
+                    0.0,
+                    1.0,
+                )
+            ),
         }
         mime_data = QMimeData()
         mime_data.setData(
@@ -268,12 +297,13 @@ class WaveformWidget(QWidget):
             source_track_key = str(payload["source_track_key"])
             selection_start = float(payload["selection_start"])
             selection_end = float(payload["selection_end"])
+            anchor_ratio = float(payload.get("anchor_ratio", 0.5))
         except (ValueError, TypeError, KeyError, json.JSONDecodeError):
             event.ignore()
             return
 
         drop_position = self._position_to_normalized(event.position().x())
-        self.selectionDropped.emit(source_track_key, selection_start, selection_end, drop_position)
+        self.selectionDropped.emit(source_track_key, selection_start, selection_end, drop_position, anchor_ratio)
         event.acceptProposedAction()
 
 
