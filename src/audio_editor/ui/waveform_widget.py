@@ -320,34 +320,75 @@ class TimelineWidget(QWidget):
 
         duration = max(self._duration_seconds, 0.0)
         if duration <= 0.0:
-            painter.drawText(2, 11, "0.0s")
+            painter.drawText(2, 11, "0")
         else:
-            target_ticks = 6
-            raw_step = duration / target_ticks
-            if raw_step <= 0.25:
-                step = 0.25
-            elif raw_step <= 0.5:
-                step = 0.5
-            elif raw_step <= 1.0:
-                step = 1.0
-            elif raw_step <= 2.0:
-                step = 2.0
-            elif raw_step <= 5.0:
-                step = 5.0
-            else:
-                step = 10.0
+            # Minor ticks are dense guide dashes. Major ticks get labels and are
+            # chosen dynamically to avoid overlap at any zoom level.
+            minor_target_px = 18
+            minor_target_ticks = max(12, int(rect.width() / minor_target_px))
+            raw_minor_step = duration / max(1, minor_target_ticks)
+            nice_steps = [
+                0.01, 0.02, 0.05,
+                0.1, 0.2, 0.25, 0.5,
+                1.0, 2.0, 2.5, 5.0,
+                10.0, 15.0, 30.0, 60.0,
+            ]
+            minor_step = nice_steps[-1]
+            for candidate in nice_steps:
+                if raw_minor_step <= candidate:
+                    minor_step = candidate
+                    break
 
+            major_label_target_px = 80
+            major_every = max(1, int(round(major_label_target_px / max(1.0, (right - left) * (minor_step / duration)))))
+            # Keep major marks on friendly boundaries (5/10 style where possible).
+            if major_every <= 2:
+                major_every = 2
+            elif major_every <= 5:
+                major_every = 5
+            else:
+                major_every = 10
+            major_step = minor_step * major_every
+
+            minor_pen = QPen(QColor("#565656"))
+            major_pen = QPen(QColor("#808080"))
+            painter.setPen(minor_pen)
+
+            tick_index = 0
             tick_time = 0.0
+            last_label_right = -9999
             while tick_time <= duration + 1e-6:
                 ratio = tick_time / duration if duration > 0 else 0.0
                 x = int(left + ratio * (right - left))
-                painter.drawLine(x, baseline_y - 5, x, baseline_y + 2)
-                painter.drawText(x + 2, 11, f"{tick_time:.1f}s")
-                tick_time += step
+                is_major = (tick_index % major_every) == 0
+                if is_major:
+                    painter.setPen(major_pen)
+                    painter.drawLine(x, baseline_y - 7, x, baseline_y + 2)
+                    painter.setPen(label_pen)
+                    decimals = 2 if major_step < 0.1 else (1 if major_step < 1.0 else 0)
+                    label = f"{tick_time:.{decimals}f}".rstrip("0").rstrip(".")
+                    label_width = painter.fontMetrics().horizontalAdvance(label)
+                    label_x = x + 2
+                    if label_x + label_width <= right and label_x > last_label_right + 8:
+                        painter.drawText(label_x, 11, label)
+                        last_label_right = label_x + label_width
+                    painter.setPen(minor_pen)
+                else:
+                    painter.drawLine(x, baseline_y - 3, x, baseline_y + 1)
 
-            if duration % step > 1e-6:
-                painter.drawLine(right, baseline_y - 5, right, baseline_y + 2)
-                painter.drawText(max(2, right - 40), 11, f"{duration:.1f}s")
+                tick_index += 1
+                tick_time = tick_index * minor_step
+
+            # Always ensure the right boundary has a tick; label only if room.
+            painter.setPen(major_pen)
+            painter.drawLine(right, baseline_y - 7, right, baseline_y + 2)
+            painter.setPen(label_pen)
+            decimals = 2 if major_step < 0.1 else (1 if major_step < 1.0 else 0)
+            end_label = f"{duration:.{decimals}f}".rstrip("0").rstrip(".")
+            end_w = painter.fontMetrics().horizontalAdvance(end_label)
+            end_x = max(2, right - end_w)
+            if end_x > last_label_right + 8:
+                painter.drawText(end_x, 11, end_label)
 
         if self._playhead_position is not None:
             playhead_x = int(left + self._playhead_position * (right - left))

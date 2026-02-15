@@ -66,6 +66,10 @@ class MainWindow(QMainWindow):
         self.transport_timeline_duration_seconds = 0.0
         self.record_visual_window_seconds = 15.0
         self.display_timeline_duration_seconds = self.record_visual_window_seconds
+        self.timeline_zoom = 1.0
+        self.timeline_zoom_min = 0.25
+        self.timeline_zoom_max = 8.0
+        self.timeline_zoom_step = 1.25
         self.current_edit_tool = self.TOOL_NONE
         self.track_selection_ranges: dict[int, tuple[float, float]] = {}
         self.clipboard_audio = np.array([], dtype=np.float32)
@@ -74,7 +78,9 @@ class MainWindow(QMainWindow):
         self.left_panel_width = 220
         self.track_row_height = 112
         self.waveform_height = 112
-        self.waveform_min_width = 0
+        self.waveform_min_width = 10
+        self.drop_snap_threshold_seconds = 0.08
+        self.drop_silence_threshold = 1e-3
         self.row_spacing = 10
         self.left_row_pitch = self.track_row_height + self.row_spacing
         self._syncing_scroll = False
@@ -83,6 +89,7 @@ class MainWindow(QMainWindow):
         self.max_history = 100
         self._restoring_history = False
         self._waveform_widgets_by_track_id: dict[int, WaveformWidget] = {}
+        self.global_playhead_position: float | None = None
 
         self.setWindowTitle("VibeCore Audio")
         self.setMinimumSize(1120, 680)
@@ -261,7 +268,25 @@ class MainWindow(QMainWindow):
 
         self.timeline_left_spacer = QWidget()
         self.timeline_left_spacer.setFixedWidth(self.left_panel_width)
+        timeline_left_spacer_layout = QHBoxLayout()
+        timeline_left_spacer_layout.setContentsMargins(0, 0, 0, 0)
+        timeline_left_spacer_layout.setSpacing(6)
+        self.timeline_left_spacer.setLayout(timeline_left_spacer_layout)
         timeline_layout.addWidget(self.timeline_left_spacer)
+
+        self.timeline_zoom_out_button = QPushButton("-")
+        self.timeline_zoom_out_button.setObjectName("actionButton")
+        self.timeline_zoom_out_button.setFixedWidth(34)
+        self.timeline_zoom_out_button.clicked.connect(self.handle_zoom_out)
+
+        self.timeline_zoom_in_button = QPushButton("+")
+        self.timeline_zoom_in_button.setObjectName("actionButton")
+        self.timeline_zoom_in_button.setFixedWidth(34)
+        self.timeline_zoom_in_button.clicked.connect(self.handle_zoom_in)
+
+        timeline_left_spacer_layout.addStretch(1)
+        timeline_left_spacer_layout.addWidget(self.timeline_zoom_out_button)
+        timeline_left_spacer_layout.addWidget(self.timeline_zoom_in_button)
 
         self.timeline_widget = TimelineWidget()
         self.timeline_widget.hide()
@@ -307,6 +332,12 @@ class MainWindow(QMainWindow):
         self.waveforms_list.setSelectionMode(QListWidget.SingleSelection)
         self.waveforms_list.viewport().installEventFilter(self)
         right_layout.addWidget(self.waveforms_list)
+        self.waveform_playhead_overlay = QFrame(self.waveforms_list.viewport())
+        self.waveform_playhead_overlay.setObjectName("waveformPlayheadOverlay")
+        self.waveform_playhead_overlay.setStyleSheet("background-color: #FF8C42; border: none;")
+        self.waveform_playhead_overlay.setFixedWidth(2)
+        self.waveform_playhead_overlay.hide()
+        self.waveform_playhead_overlay.raise_()
         # Internal status text target used across handlers; kept hidden from panel UI.
         self.sub_label = QLabel("")
         self.sub_label.setObjectName("subLabel")
@@ -348,6 +379,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):  # noqa: N802 (Qt API)
         super().resizeEvent(event)
         self._sync_waveform_widths()
+        self._update_waveform_overlay_playhead()
 
     @Slot()
     def handle_reorder_tracks(self):
@@ -510,11 +542,16 @@ class MainWindow(QMainWindow):
         self.timeline_host.setVisible(has_tracks)
         self.empty_state_widget.setVisible(not has_tracks)
         self.timeline_widget.setVisible(has_tracks)
+        self.timeline_zoom_in_button.setVisible(has_tracks)
+        self.timeline_zoom_out_button.setVisible(has_tracks)
         self.waveforms_list.setVisible(has_tracks)
         if not has_tracks:
             self.display_timeline_duration_seconds = self.record_visual_window_seconds
+            self.timeline_zoom = 1.0
             self.timeline_widget.set_duration_seconds(0.0)
             self.timeline_widget.set_playhead_position(None)
+            self.global_playhead_position = None
+            self.waveform_playhead_overlay.hide()
 
     def sync_waveform_for_track(self, track: AudioTrack):
         waveform = self.track_waveform_widgets.get(id(track))
@@ -536,7 +573,7 @@ class MainWindow(QMainWindow):
 
     def _update_timeline_scale(self):
         self._update_display_timeline_duration()
-        self.timeline_widget.set_duration_seconds(self.display_timeline_duration_seconds)
+        self.timeline_widget.set_duration_seconds(self._visible_timeline_duration_seconds())
 
     def _update_display_timeline_duration(self, minimum_seconds: float = 0.0):
         target = max(
@@ -545,6 +582,19 @@ class MainWindow(QMainWindow):
             max(0.0, minimum_seconds),
         )
         self.display_timeline_duration_seconds = max(self.display_timeline_duration_seconds, target)
+
+    def _visible_timeline_duration_seconds(self) -> float:
+        return max(0.01, self.display_timeline_duration_seconds / max(self.timeline_zoom, 0.01))
+
+    def handle_zoom_in(self):
+        self.timeline_zoom = min(self.timeline_zoom_max, self.timeline_zoom * self.timeline_zoom_step)
+        self._sync_waveform_widths()
+        self._update_timeline_scale()
+
+    def handle_zoom_out(self):
+        self.timeline_zoom = max(self.timeline_zoom_min, self.timeline_zoom / self.timeline_zoom_step)
+        self._sync_waveform_widths()
+        self._update_timeline_scale()
 
     def _effective_track_duration_seconds(self, track: AudioTrack, recording_elapsed_seconds: float = 0.0) -> float:
         base_duration = len(track.data) / max(track.sample_rate, 1)
@@ -562,14 +612,16 @@ class MainWindow(QMainWindow):
             return
 
         viewport_width = max(1, self.waveforms_list.viewport().width() - 4)
+        timeline_width = max(1, self.timeline_widget.width())
+        lane_width = min(viewport_width, timeline_width)
         if project_duration_override is not None:
-            project_duration = max(0.0, project_duration_override)
+            project_duration = max(0.0, project_duration_override / max(self.timeline_zoom, 0.01))
         else:
             self._update_display_timeline_duration()
-            project_duration = self.display_timeline_duration_seconds
+            project_duration = self._visible_timeline_duration_seconds()
         if project_duration <= 0:
             for waveform in self._waveform_widgets_by_track_id.values():
-                waveform.setFixedWidth(self.waveform_min_width)
+                waveform.setFixedWidth(min(lane_width, self.waveform_min_width))
             return
 
         for track in tracks:
@@ -578,12 +630,13 @@ class MainWindow(QMainWindow):
                 continue
             track_duration = self._effective_track_duration_seconds(track, recording_elapsed_seconds)
             if track_duration <= 0:
-                # Keep empty tracks visually minimal so recording starts at the left edge immediately.
-                target_width = self.waveform_min_width
+                # Keep empty tracks full-width so drops can be positioned anywhere.
+                target_width = lane_width
             else:
                 ratio = min(1.0, track_duration / project_duration)
-                target_width = max(self.waveform_min_width, int(viewport_width * ratio))
-            waveform.setFixedWidth(min(viewport_width, target_width))
+                target_width = max(self.waveform_min_width, int(lane_width * ratio))
+            waveform.setFixedWidth(min(lane_width, target_width))
+        self._update_waveform_overlay_playhead()
 
     def refresh_track_list(self, selected_track_id: int | None = None):
         self.track_list.blockSignals(True)
@@ -603,6 +656,33 @@ class MainWindow(QMainWindow):
         for waveform in self.track_waveform_widgets.values():
             waveform.set_playhead_position(None)
         self.timeline_widget.set_playhead_position(None)
+        self.global_playhead_position = None
+        self.waveform_playhead_overlay.hide()
+
+    def _set_global_playhead(self, position: float | None):
+        self.global_playhead_position = position
+        self.timeline_widget.set_playhead_position(position)
+        self._update_waveform_overlay_playhead(position)
+
+    def _update_waveform_overlay_playhead(self, position: float | None = None):
+        if position is None:
+            position = self.global_playhead_position
+        if position is None or not self.waveforms_list.isVisible():
+            self.waveform_playhead_overlay.hide()
+            return
+
+        viewport = self.waveforms_list.viewport()
+        lane_width = max(1, min(max(1, viewport.width() - 4), max(1, self.timeline_widget.width())))
+        x = int(float(position) * (lane_width - 1))
+        x = int(np.clip(x, 0, max(0, viewport.width() - self.waveform_playhead_overlay.width())))
+        self.waveform_playhead_overlay.setGeometry(
+            x,
+            0,
+            self.waveform_playhead_overlay.width(),
+            viewport.height(),
+        )
+        self.waveform_playhead_overlay.show()
+        self.waveform_playhead_overlay.raise_()
 
     def start_transport(
         self,
@@ -638,7 +718,7 @@ class MainWindow(QMainWindow):
             self.display_timeline_duration_seconds,
             self.transport_timeline_duration_seconds,
         )
-        self.timeline_widget.set_duration_seconds(self.transport_timeline_duration_seconds)
+        self.timeline_widget.set_duration_seconds(self._visible_timeline_duration_seconds())
         self.transport_timer.start()
         self.update_transport_visuals()
 
@@ -671,9 +751,11 @@ class MainWindow(QMainWindow):
 
             preview = self.audio_engine.get_recording_preview()
             waveform.set_audio_data(preview)
-            waveform.set_playhead_position(None)
 
-            absolute_record_time = self.transport_record_base_duration_seconds + elapsed
+            # Use recorded sample count for indicator timing so playhead pace
+            # matches the visible waveform growth exactly.
+            preview_seconds = preview.size / max(self.transport_record_sample_rate, 1)
+            absolute_record_time = self.transport_record_base_duration_seconds + preview_seconds
             while absolute_record_time > self.transport_timeline_duration_seconds:
                 self.transport_timeline_duration_seconds += self.record_visual_window_seconds
             self.transport_timeline_duration_seconds = max(
@@ -686,16 +768,18 @@ class MainWindow(QMainWindow):
                 self.transport_timeline_duration_seconds,
             )
 
-            self.timeline_widget.set_duration_seconds(self.transport_timeline_duration_seconds)
+            self.timeline_widget.set_duration_seconds(
+                max(0.01, self.transport_timeline_duration_seconds / max(self.timeline_zoom, 0.01))
+            )
             timeline_progress = (
-                absolute_record_time / self.transport_timeline_duration_seconds
+                absolute_record_time / max(0.01, self.transport_timeline_duration_seconds / max(self.timeline_zoom, 0.01))
                 if self.transport_timeline_duration_seconds > 0
                 else 0.0
             )
-            self.timeline_widget.set_playhead_position(min(1.0, timeline_progress))
+            self._set_global_playhead(min(1.0, timeline_progress))
             self._sync_waveform_widths(
                 project_duration_override=self.transport_timeline_duration_seconds,
-                recording_elapsed_seconds=elapsed,
+                recording_elapsed_seconds=preview_seconds,
             )
             return
 
@@ -705,16 +789,11 @@ class MainWindow(QMainWindow):
 
         progress = min(1.0, elapsed / self.transport_duration_seconds)
 
-        if self.transport_mode == "play_track":
-            self.timeline_widget.set_playhead_position(progress)
-            for track_id in self.transport_track_ids:
-                waveform = self.track_waveform_widgets.get(track_id)
-                if waveform is not None:
-                    waveform.set_playhead_position(progress)
-        elif self.transport_mode == "play_project":
-            self.timeline_widget.set_playhead_position(progress)
-            for waveform in self.track_waveform_widgets.values():
-                waveform.set_playhead_position(None)
+        visible_duration = max(0.01, self._visible_timeline_duration_seconds())
+        timeline_progress = min(1.0, elapsed / visible_duration)
+
+        if self.transport_mode in ("play_track", "play_project"):
+            self._set_global_playhead(timeline_progress)
 
         if progress >= 1.0:
             self.stop_transport()
@@ -815,6 +894,20 @@ class MainWindow(QMainWindow):
             return 0
         return int(np.clip(position, 0.0, 1.0) * data.size)
 
+    def _timeline_sample_index_from_normalized(self, track: AudioTrack, position: float) -> int:
+        visible_seconds = self._visible_timeline_duration_seconds()
+        timeline_samples = int(max(1.0, visible_seconds) * max(track.sample_rate, 1))
+        data_samples = len(self._track_data_array(track))
+        span_samples = max(data_samples, timeline_samples)
+        return int(np.clip(position, 0.0, 1.0) * span_samples)
+
+    def _resolve_drop_insert_index(self, track: AudioTrack, raw_index: int) -> int:
+        nearest = track.nearest_boundary(raw_index)
+        threshold_samples = max(1, int(max(track.sample_rate, 1) * self.drop_snap_threshold_seconds))
+        if abs(nearest - raw_index) <= threshold_samples:
+            return nearest
+        return int(max(0, raw_index))
+
     def _generate_unique_track_name(self, base_name: str) -> str:
         existing = {t.name for t in self.project.get_tracks()}
         if base_name not in existing:
@@ -864,8 +957,7 @@ class MainWindow(QMainWindow):
             return
 
         self.push_undo_state()
-        target_data_before = self._track_data_array(target_track)
-        target_drop_index = int(np.clip(drop_position, 0.0, 1.0) * target_data_before.size)
+        target_drop_index = self._timeline_sample_index_from_normalized(target_track, drop_position)
 
         if source_track is target_track:
             source_track.cut_range(src_start, src_end)
@@ -874,8 +966,22 @@ class MainWindow(QMainWindow):
                 target_drop_index -= moved_len
             elif src_start < target_drop_index <= src_end:
                 target_drop_index = src_start
-            snapped_index = source_track.nearest_boundary(target_drop_index)
-            source_track.insert_data(snapped_index, moved_segment, as_new_segment=True)
+            exact_index = int(max(0, target_drop_index))
+            placed_exact = source_track.place_data_at(
+                exact_index,
+                moved_segment,
+                as_new_segment=True,
+                overwrite_silence_only=True,
+                silence_threshold=self.drop_silence_threshold,
+            )
+            if not placed_exact:
+                insert_index = self._resolve_drop_insert_index(source_track, target_drop_index)
+                source_track.insert_data(
+                    insert_index,
+                    moved_segment,
+                    as_new_segment=True,
+                    allow_gaps=True,
+                )
             self.track_selection_ranges.pop(id(source_track), None)
             self.stop_transport()
             self.sync_waveform_for_track(source_track)
@@ -884,8 +990,23 @@ class MainWindow(QMainWindow):
             return
 
         source_track.cut_range(src_start, src_end)
-        snapped_index = target_track.nearest_boundary(target_drop_index)
-        target_track.insert_data(snapped_index, moved_segment, as_new_segment=True)
+        exact_index = int(max(0, target_drop_index))
+        target_is_empty = len(self._track_data_array(target_track)) == 0
+        placed_exact = target_track.place_data_at(
+            exact_index,
+            moved_segment,
+            as_new_segment=True,
+            overwrite_silence_only=not target_is_empty,
+            silence_threshold=self.drop_silence_threshold,
+        )
+        if not placed_exact:
+            insert_index = self._resolve_drop_insert_index(target_track, target_drop_index)
+            target_track.insert_data(
+                insert_index,
+                moved_segment,
+                as_new_segment=True,
+                allow_gaps=True,
+            )
 
         self.track_selection_ranges.pop(id(source_track), None)
         self.stop_transport()
