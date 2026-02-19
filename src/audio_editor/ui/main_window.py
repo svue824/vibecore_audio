@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
         self.transport_record_track_id: int | None = None
         self.transport_record_sample_rate = 44100
         self.transport_record_base_duration_seconds = 0.0
+        self.transport_record_base_audio = np.array([], dtype=np.float32)
         self.transport_timeline_duration_seconds = 0.0
         self.record_visual_window_seconds = 15.0
         self.display_timeline_duration_seconds = self.record_visual_window_seconds
@@ -733,6 +734,7 @@ class MainWindow(QMainWindow):
         self.transport_record_track_id = None
         self.transport_record_sample_rate = 44100
         self.transport_record_base_duration_seconds = 0.0
+        self.transport_record_base_audio = np.array([], dtype=np.float32)
         self.transport_timeline_duration_seconds = 0.0
         self.clear_all_playheads()
 
@@ -753,7 +755,13 @@ class MainWindow(QMainWindow):
                 return
 
             preview = self.audio_engine.get_recording_preview()
-            waveform.set_audio_data(preview)
+            if self.transport_record_base_audio.size > 0 and preview.size > 0:
+                visual_audio = np.concatenate((self.transport_record_base_audio, preview))
+            elif self.transport_record_base_audio.size > 0:
+                visual_audio = self.transport_record_base_audio
+            else:
+                visual_audio = preview
+            waveform.set_audio_data(visual_audio)
 
             # Use recorded sample count for indicator timing so playhead pace
             # matches the visible waveform growth exactly.
@@ -2174,6 +2182,8 @@ class MainWindow(QMainWindow):
             if not track:
                 return
             self.stop_transport()
+            # Freeze the pre-record track waveform so live preview extends from it.
+            self.transport_record_base_audio = np.array(track.data, dtype=np.float32).copy()
             start_use_case = StartRecording(self.audio_engine)
             start_use_case.execute(track.sample_rate)
             self.record_button.setText("■")
