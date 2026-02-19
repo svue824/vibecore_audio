@@ -261,19 +261,6 @@ class MainWindow(QMainWindow):
         )
         self.tools_dropdown.currentTextChanged.connect(self.on_tool_changed)
         action_strip_layout.addWidget(self.tools_dropdown)
-
-        self.timeline_zoom_out_button = QPushButton("Zoom -")
-        self.timeline_zoom_out_button.setObjectName("actionButton")
-        self.timeline_zoom_out_button.setToolTip("Zoom Out Timeline/Waveforms")
-        self.timeline_zoom_out_button.clicked.connect(self.handle_zoom_out)
-        action_strip_layout.addWidget(self.timeline_zoom_out_button)
-
-        self.timeline_zoom_in_button = QPushButton("Zoom +")
-        self.timeline_zoom_in_button.setObjectName("actionButton")
-        self.timeline_zoom_in_button.setToolTip("Zoom In Timeline/Waveforms")
-        self.timeline_zoom_in_button.clicked.connect(self.handle_zoom_in)
-        action_strip_layout.addWidget(self.timeline_zoom_in_button)
-
         action_strip_layout.addStretch(1)
 
         # ===== Timeline Row =====
@@ -292,7 +279,19 @@ class MainWindow(QMainWindow):
         self.timeline_left_spacer.setLayout(timeline_left_spacer_layout)
         timeline_layout.addWidget(self.timeline_left_spacer)
 
-        timeline_left_spacer_layout.addStretch(1)
+        self.timeline_zoom_out_button = QPushButton("Zoom -")
+        self.timeline_zoom_out_button.setObjectName("actionButton")
+        self.timeline_zoom_out_button.setToolTip("Zoom Out Timeline/Waveforms")
+        self.timeline_zoom_out_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.timeline_zoom_out_button.clicked.connect(self.handle_zoom_out)
+        timeline_left_spacer_layout.addWidget(self.timeline_zoom_out_button, 1)
+
+        self.timeline_zoom_in_button = QPushButton("Zoom +")
+        self.timeline_zoom_in_button.setObjectName("actionButton")
+        self.timeline_zoom_in_button.setToolTip("Zoom In Timeline/Waveforms")
+        self.timeline_zoom_in_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.timeline_zoom_in_button.clicked.connect(self.handle_zoom_in)
+        timeline_left_spacer_layout.addWidget(self.timeline_zoom_in_button, 1)
 
         self.timeline_widget = TimelineWidget()
         self.timeline_widget.hide()
