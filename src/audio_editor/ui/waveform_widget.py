@@ -17,6 +17,7 @@ class WaveformWidget(QWidget):
         super().__init__(parent)
         self._audio_data = np.array([], dtype=np.float32)
         self._playhead_position: float | None = None
+        self._edit_cursor_position: float | None = None
         self._segment_markers: list[float] = []
         self._track_key = ""
         self._interaction_mode = "click"
@@ -44,6 +45,14 @@ class WaveformWidget(QWidget):
             self._playhead_position = None
         else:
             self._playhead_position = float(np.clip(position, 0.0, 1.0))
+        self.update()
+
+    def set_edit_cursor_position(self, position: float | None) -> None:
+        """Set edit cursor location as normalized [0,1], or None to hide it."""
+        if position is None:
+            self._edit_cursor_position = None
+        else:
+            self._edit_cursor_position = float(np.clip(position, 0.0, 1.0))
         self.update()
 
     def set_segment_markers(self, boundaries: list[int], total_samples: int) -> None:
@@ -176,6 +185,13 @@ class WaveformWidget(QWidget):
             for marker in self._segment_markers:
                 x = int(marker * (width - 1))
                 painter.drawLine(x, 0, x, height)
+
+        if self._edit_cursor_position is not None:
+            cursor_x = int(self._edit_cursor_position * (width - 1))
+            cursor_pen = QPen(QColor("#FFD166"))
+            cursor_pen.setWidth(2)
+            painter.setPen(cursor_pen)
+            painter.drawLine(cursor_x, 0, cursor_x, height)
 
         if self._playhead_position is not None:
             playhead_x = int(self._playhead_position * (width - 1))

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QSlider,
     QCheckBox,
+    QLineEdit,
     QComboBox,
     QToolButton,
     QMenu,
@@ -73,6 +74,8 @@ class MainWindow(QMainWindow):
         self.timeline_zoom_step = 1.25
         self.current_edit_tool = self.TOOL_NONE
         self.track_selection_ranges: dict[int, tuple[float, float]] = {}
+        self.track_edit_cursors: dict[int, float] = {}
+        self.edit_cursor_click_threshold = 0.0025
         self.clipboard_audio = np.array([], dtype=np.float32)
         self.clipboard_sample_rate = 44100
         self.project_file_path: str | None = None
@@ -293,6 +296,7 @@ class MainWindow(QMainWindow):
 
         self.timeline_widget = TimelineWidget()
         self.timeline_widget.hide()
+        self.timeline_widget.installEventFilter(self)
         timeline_layout.addWidget(self.timeline_widget, 1)
 
         # ===== Main Panels (Left + Right) =====
@@ -444,26 +448,42 @@ class MainWindow(QMainWindow):
         container = QWidget()
         container.setObjectName("trackRow")
         container.setMinimumHeight(self.track_row_height)
-        layout = QHBoxLayout()
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(8)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignVCenter)
 
         # Track label
-        label = QLabel(track.name)
-        layout.addWidget(label)
+        name_editor = QLineEdit(track.name)
+        name_editor.setObjectName("trackNameEditor")
+        name_editor.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        name_editor.editingFinished.connect(lambda t=track, editor=name_editor: self.on_track_name_edited(t, editor))
+        layout.addWidget(name_editor)
 
-        # Volume slider
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+        controls_layout.addStretch(1)
+
+        # Mute checkbox (left)
+        mute_checkbox = QCheckBox("Mute")
+        mute_checkbox.setObjectName("trackMuteControl")
+        mute_checkbox.setChecked(track.muted)
+        mute_checkbox.toggled.connect(lambda checked, t=track: self.on_mute_toggled(t, checked))
+        controls_layout.addWidget(mute_checkbox, 0, Qt.AlignVCenter)
+
+        # Volume slider (right)
         slider = QSlider(Qt.Horizontal)
+        slider.setObjectName("trackVolumeSlider")
+        slider.setMinimumWidth(96)
+        slider.setMaximumWidth(140)
         slider.setRange(0, 100)
         slider.setValue(int(track.volume * 100))
         slider.valueChanged.connect(lambda val, t=track: self.on_volume_changed(t, val))
-        layout.addWidget(slider)
+        controls_layout.addWidget(slider, 1)
+        controls_layout.addStretch(1)
 
-        # Mute checkbox
-        mute_checkbox = QCheckBox("Mute")
-        mute_checkbox.setChecked(track.muted)
-        mute_checkbox.toggled.connect(lambda checked, t=track: self.on_mute_toggled(t, checked))
-        layout.addWidget(mute_checkbox)
+        layout.addLayout(controls_layout)
 
         container.setLayout(layout)
 
@@ -472,6 +492,24 @@ class MainWindow(QMainWindow):
         self.track_list.addItem(item)
         self.track_list.setItemWidget(item, container)
         item.setSizeHint(QSize(0, self.left_row_pitch))
+
+    def on_track_name_edited(self, track: AudioTrack, editor: QLineEdit):
+        new_name = editor.text().strip()
+        if not new_name:
+            editor.setText(track.name)
+            return
+        if new_name == track.name:
+            return
+        try:
+            self.push_undo_state()
+            rename_use_case = RenameTrack(self.project)
+            rename_use_case.execute(track, new_name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Rename Track", str(exc))
+            editor.setText(track.name)
+            return
+        editor.setText(track.name)
+        self.sync_waveform_for_track(track)
 
     def add_waveform_ui_item(self, track: AudioTrack):
         self.empty_state_widget.setVisible(False)
@@ -502,6 +540,7 @@ class MainWindow(QMainWindow):
             waveform.set_selection_range(selected_range[0], selected_range[1])
         else:
             waveform.clear_selection()
+        waveform.set_edit_cursor_position(self.track_edit_cursors.get(id(track)))
         row_layout.addWidget(waveform)
         row_layout.addStretch(1)
 
@@ -573,8 +612,24 @@ class MainWindow(QMainWindow):
                 waveform.set_selection_range(selected_range[0], selected_range[1])
             else:
                 waveform.clear_selection()
+            waveform.set_edit_cursor_position(self.track_edit_cursors.get(id(track)))
         self._sync_waveform_widths()
         self._update_timeline_scale()
+
+    def _select_track_from_waveform(self, track: AudioTrack):
+        tracks = self.project.get_tracks()
+        row = next((i for i, existing in enumerate(tracks) if id(existing) == id(track)), -1)
+        if row < 0:
+            return
+        self.track_list.blockSignals(True)
+        self.waveforms_list.blockSignals(True)
+        self.track_list.setCurrentRow(row)
+        self.waveforms_list.setCurrentRow(row)
+        self.track_list.blockSignals(False)
+        self.waveforms_list.blockSignals(False)
+        self.delete_button.setEnabled(row != -1)
+        self._update_left_row_selection_visual()
+        self._update_right_row_selection_visual()
 
     def _project_duration_seconds(self) -> float:
         tracks = self.project.get_tracks()
@@ -843,6 +898,28 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "waveforms_list") or not hasattr(self, "track_list"):
             return super().eventFilter(watched, event)
 
+        if event.type() == QEvent.Wheel:
+            delta_y = event.angleDelta().y()
+            if delta_y == 0:
+                delta_y = event.angleDelta().x()
+
+            if watched == self.timeline_widget and delta_y != 0:
+                if delta_y > 0:
+                    self.handle_zoom_in()
+                else:
+                    self.handle_zoom_out()
+                event.accept()
+                return True
+
+            if watched == self.waveforms_list.viewport() and delta_y != 0:
+                if event.modifiers() & Qt.ControlModifier:
+                    if delta_y > 0:
+                        self.handle_zoom_in()
+                    else:
+                        self.handle_zoom_out()
+                    event.accept()
+                    return True
+
         if watched == self.waveforms_list.viewport():
             if event.type() in (QEvent.DragEnter, QEvent.DragMove):
                 if event.mimeData().hasFormat("application/x-vibecore-selection"):
@@ -928,12 +1005,14 @@ class MainWindow(QMainWindow):
         self.current_edit_tool = tool_name
         if tool_name != self.TOOL_SELECT:
             self.track_selection_ranges.clear()
+            self.track_edit_cursors.clear()
         for track in self.project.get_tracks():
             waveform = self.track_waveform_widgets.get(id(track))
             if waveform:
                 waveform.set_interaction_mode(self._waveform_interaction_mode_for_tool())
                 if tool_name != self.TOOL_SELECT:
                     waveform.clear_selection()
+                    waveform.set_edit_cursor_position(None)
         self.update_cut_controls()
 
     def _waveform_interaction_mode_for_tool(self) -> str:
@@ -1225,11 +1304,26 @@ class MainWindow(QMainWindow):
         return None
 
     def on_waveform_selection_changed(self, track: AudioTrack, start: float, end: float):
+        self._select_track_from_waveform(track)
         if self.current_edit_tool != self.TOOL_SELECT:
             return
-        self.track_selection_ranges[id(track)] = (start, end)
+
+        start_norm = float(np.clip(min(start, end), 0.0, 1.0))
+        end_norm = float(np.clip(max(start, end), 0.0, 1.0))
+        if abs(end_norm - start_norm) <= self.edit_cursor_click_threshold:
+            cursor_position = float((start_norm + end_norm) * 0.5)
+            self.track_selection_ranges.pop(id(track), None)
+            self.track_edit_cursors[id(track)] = cursor_position
+            self.sync_waveform_for_track(track)
+            self.sub_label.setText(f"Cursor set at {int(cursor_position * 100)}% on {track.name}")
+            self.update_cut_controls()
+            return
+
+        self.track_edit_cursors.pop(id(track), None)
+        self.track_selection_ranges[id(track)] = (start_norm, end_norm)
+        self.sync_waveform_for_track(track)
         self.sub_label.setText(
-            f"Selected {int(start * 100)}% - {int(end * 100)}% on {track.name}"
+            f"Selected {int(start_norm * 100)}% - {int(end_norm * 100)}% on {track.name}"
         )
         self.update_cut_controls()
 
@@ -1450,6 +1544,7 @@ class MainWindow(QMainWindow):
         self.sub_label.setText(f"Moved selection from {source_track.name} to {target_track.name}")
 
     def on_waveform_clicked(self, track: AudioTrack, position: float):
+        self._select_track_from_waveform(track)
         if self.current_edit_tool == self.TOOL_NONE:
             self.select_entire_clip_at(track, position)
         elif self.current_edit_tool == self.TOOL_SPLIT:
@@ -1489,7 +1584,9 @@ class MainWindow(QMainWindow):
 
     def update_cut_controls(self):
         has_selection = bool(self.track_selection_ranges)
-        can_cut = self.current_edit_tool in (self.TOOL_SELECT, self.TOOL_NONE) and has_selection
+        selected_track = self.get_selected_track()
+        has_cursor = selected_track is not None and id(selected_track) in self.track_edit_cursors
+        can_cut = self.current_edit_tool in (self.TOOL_SELECT, self.TOOL_NONE) and (has_selection or has_cursor)
         self.cut_button.setEnabled(can_cut)
         self.copy_button.setEnabled(has_selection)
         self.paste_button.setEnabled(self.clipboard_audio.size > 0)
@@ -1546,6 +1643,7 @@ class MainWindow(QMainWindow):
 
             self.project._tracks = restored_tracks
             self.track_selection_ranges.clear()
+            self.track_edit_cursors.clear()
             for idx, selection in state.get("selections_by_index", {}).items():
                 if 0 <= idx < len(restored_tracks):
                     self.track_selection_ranges[id(restored_tracks[idx])] = tuple(selection)
@@ -1841,6 +1939,7 @@ class MainWindow(QMainWindow):
         self.project._tracks = restored_tracks
         self.project.name = str(payload.get("name", "My Project"))
         self.track_selection_ranges.clear()
+        self.track_edit_cursors.clear()
         self.project_file_path = file_path
         self.undo_stack.clear()
         self.redo_stack.clear()
@@ -1885,7 +1984,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Export Mix", f"Failed to export mix:\n{exc}")
 
     def handle_delete_key(self):
-        if self.current_edit_tool in (self.TOOL_SELECT, self.TOOL_NONE) and self.track_selection_ranges:
+        selected_track = self.get_selected_track()
+        has_cursor = selected_track is not None and id(selected_track) in self.track_edit_cursors
+        if self.current_edit_tool in (self.TOOL_SELECT, self.TOOL_NONE) and (self.track_selection_ranges or has_cursor):
             self.handle_cut_selection()
             return
         self.handle_delete_track()
@@ -1894,6 +1995,13 @@ class MainWindow(QMainWindow):
         if self.current_edit_tool not in (self.TOOL_SELECT, self.TOOL_NONE):
             return
         if not self.track_selection_ranges:
+            selected_track = self.get_selected_track()
+            if selected_track is None:
+                return
+            cursor_position = self.track_edit_cursors.get(id(selected_track))
+            if cursor_position is None:
+                return
+            self.split_track_at(selected_track, cursor_position)
             return
 
         self.push_undo_state()
@@ -2040,6 +2148,7 @@ class MainWindow(QMainWindow):
 
         # Remove from sidebar
         self.track_selection_ranges.pop(id(track_to_delete), None)
+        self.track_edit_cursors.pop(id(track_to_delete), None)
         self.refresh_track_list()
         self.sub_label.setText(f"{self.project.track_count()} track(s) in project")
         self.refresh_waveform_panel()
