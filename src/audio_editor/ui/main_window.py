@@ -2133,17 +2133,46 @@ class MainWindow(QMainWindow):
         track_ids = {id(t) for t in self.project.get_tracks()}
         self.start_transport("play_project", track_ids, max_duration)
 
+    def _find_track_by_id(self, track_id: int | None):
+        if track_id is None:
+            return None
+        return next((t for t in self.project.get_tracks() if id(t) == track_id), None)
+
+    def _stop_active_recording(self) -> bool:
+        """Stop and commit an active recording session if one is running."""
+        if not self.audio_engine.is_recording():
+            return False
+
+        recording_track = self._find_track_by_id(self.transport_record_track_id) or self.get_selected_track()
+        if recording_track is None:
+            # Fallback: ensure stream is stopped even if the track target cannot be resolved.
+            self.audio_engine.stop_recording()
+            self.record_button.setText("●")
+            self.record_button.setToolTip("Record")
+            self.stop_transport()
+            return True
+
+        self.push_undo_state()
+        stop_use_case = StopRecording(self.audio_engine)
+        stop_use_case.execute(recording_track)
+        self.record_button.setText("●")
+        self.record_button.setToolTip("Record")
+        self.sync_waveform_for_track(recording_track)
+        self.stop_transport()
+        return True
+
     def handle_stop(self):
+        if self._stop_active_recording():
+            return
         self.audio_engine.stop()
         self.stop_transport()
 
 
     def handle_record_toggle(self):
-        track = self.get_selected_track()
-        if not track:
-            return
-
         if not self.audio_engine.is_recording():
+            track = self.get_selected_track()
+            if not track:
+                return
             self.stop_transport()
             start_use_case = StartRecording(self.audio_engine)
             start_use_case.execute(track.sample_rate)
@@ -2158,13 +2187,7 @@ class MainWindow(QMainWindow):
                 record_base_duration_seconds=(len(track.data) / max(track.sample_rate, 1)),
             )
         else:
-            self.push_undo_state()
-            stop_use_case = StopRecording(self.audio_engine)
-            stop_use_case.execute(track)
-            self.record_button.setText("●")
-            self.record_button.setToolTip("Record")
-            self.sync_waveform_for_track(track)
-            self.stop_transport()
+            self._stop_active_recording()
 
             # Update the track name label (not needed for sample count since we use widgets now)
     
