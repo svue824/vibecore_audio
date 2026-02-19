@@ -258,6 +258,19 @@ class MainWindow(QMainWindow):
         )
         self.tools_dropdown.currentTextChanged.connect(self.on_tool_changed)
         action_strip_layout.addWidget(self.tools_dropdown)
+
+        self.timeline_zoom_out_button = QPushButton("Zoom -")
+        self.timeline_zoom_out_button.setObjectName("actionButton")
+        self.timeline_zoom_out_button.setToolTip("Zoom Out Timeline/Waveforms")
+        self.timeline_zoom_out_button.clicked.connect(self.handle_zoom_out)
+        action_strip_layout.addWidget(self.timeline_zoom_out_button)
+
+        self.timeline_zoom_in_button = QPushButton("Zoom +")
+        self.timeline_zoom_in_button.setObjectName("actionButton")
+        self.timeline_zoom_in_button.setToolTip("Zoom In Timeline/Waveforms")
+        self.timeline_zoom_in_button.clicked.connect(self.handle_zoom_in)
+        action_strip_layout.addWidget(self.timeline_zoom_in_button)
+
         action_strip_layout.addStretch(1)
 
         # ===== Timeline Row =====
@@ -276,19 +289,7 @@ class MainWindow(QMainWindow):
         self.timeline_left_spacer.setLayout(timeline_left_spacer_layout)
         timeline_layout.addWidget(self.timeline_left_spacer)
 
-        self.timeline_zoom_out_button = QPushButton("-")
-        self.timeline_zoom_out_button.setObjectName("actionButton")
-        self.timeline_zoom_out_button.setFixedWidth(34)
-        self.timeline_zoom_out_button.clicked.connect(self.handle_zoom_out)
-
-        self.timeline_zoom_in_button = QPushButton("+")
-        self.timeline_zoom_in_button.setObjectName("actionButton")
-        self.timeline_zoom_in_button.setFixedWidth(34)
-        self.timeline_zoom_in_button.clicked.connect(self.handle_zoom_in)
-
         timeline_left_spacer_layout.addStretch(1)
-        timeline_left_spacer_layout.addWidget(self.timeline_zoom_out_button)
-        timeline_left_spacer_layout.addWidget(self.timeline_zoom_in_button)
 
         self.timeline_widget = TimelineWidget()
         self.timeline_widget.hide()
@@ -362,6 +363,12 @@ class MainWindow(QMainWindow):
         self.redo_shortcut.activated.connect(self.handle_redo)
         self.redo_shortcut_alt = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
         self.redo_shortcut_alt.activated.connect(self.handle_redo)
+        self.zoom_in_shortcut = QShortcut(QKeySequence("Ctrl+="), self)
+        self.zoom_in_shortcut.activated.connect(self.handle_zoom_in)
+        self.zoom_in_shortcut_alt = QShortcut(QKeySequence("Ctrl++"), self)
+        self.zoom_in_shortcut_alt.activated.connect(self.handle_zoom_in)
+        self.zoom_out_shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
+        self.zoom_out_shortcut.activated.connect(self.handle_zoom_out)
         self.track_list.verticalScrollBar().valueChanged.connect(self.sync_right_scroll_to_left)
         self.waveforms_list.verticalScrollBar().valueChanged.connect(self.sync_left_scroll_to_right)
         self.refresh_waveform_panel()
